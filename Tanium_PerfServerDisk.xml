@@ -13,9 +13,9 @@
 	<SchedulesEnabled>-1</SchedulesEnabled>
 	<LatestOutputLocation>
 	</LatestOutputLocation>
-	<Name>Tanium</Name>
-	<OutputLocation>C:\PerfLogs\Tanium\WLREM1812195_20180319-000001</OutputLocation>
-	<RootPath>%systemdrive%\PerfLogs\Tanium</RootPath>
+	<Name>Tanium_Performance</Name>
+	<OutputLocation>C:\PerfLogs\Admin\Tanium_Performance\MACHINE_20180924-000001</OutputLocation>
+	<RootPath>%systemdrive%\PerfLogs\Admin\Tanium_Performance</RootPath>
 	<Segment>-1</Segment>
 	<SegmentMaxDuration>0</SegmentMaxDuration>
 	<SegmentMaxSize>200</SegmentMaxSize>
@@ -34,14 +34,15 @@
 	<TaskUserTextArguments>
 	</TaskUserTextArguments>
 	<UserAccount>SYSTEM</UserAccount>
-	<Security>O:BAG:DUD:AI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;LU)(A;;0x1301ff;;;S-1-5-80-2661322625-712705077-2999183737-3043590567-590698655)(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FR;;;AU)(A;ID;FR;;;LS)(A;ID;FR;;;NS)(A;ID;FA;;;BA)</Security>
+	<Security>O:BAG:S-1-5-21-1775759613-3373300012-3439947537-1001D:AI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;LU)(A;;0x1301ff;;;S-1-5-80-2661322625-712705077-2999183737-3043590567-590698655)(A;ID;0x1f019f;;;BA)(A;ID;0x1f019f;;;SY)(A;ID;FR;;;AU)(A;ID;FR;;;LS)(A;ID;FR;;;NS)(A;ID;FA;;;BA)</Security>
 	<StopOnCompletion>0</StopOnCompletion>
 	<PerformanceCounterDataCollector>
 		<DataCollectorType>0</DataCollectorType>
-		<Name>PAL_System_Overview</Name>
-		<FileName>PAL_System_Overview</FileName>
+		<Name>Tanium_System_Overview</Name>
+		<FileName>Tanium_Performance</FileName>
 		<FileNameFormat>1</FileNameFormat>
-		<FileNameFormatPattern>MMddHHmmsszz</FileNameFormatPattern>
+		<FileNameFormatPattern>
+		</FileNameFormatPattern>
 		<LogAppend>0</LogAppend>
 		<LogCircular>0</LogCircular>
 		<LogOverwrite>0</LogOverwrite>
@@ -73,11 +74,15 @@
 		<Counter>\Memory\Committed Bytes</Counter>
 		<Counter>\Memory\Free &amp; Zero Page List Bytes</Counter>
 		<Counter>\Memory\Free System Page Table Entries</Counter>
+		<Counter>\Memory\Long-Term Average Standby Cache Lifetime (s)</Counter>
+		<Counter>\Memory\Pages Input/sec</Counter>
+		<Counter>\Memory\Pages Output/sec</Counter>
 		<Counter>\Memory\Pages/sec</Counter>
 		<Counter>\Memory\Pool Nonpaged Bytes</Counter>
 		<Counter>\Memory\Pool Paged Bytes</Counter>
 		<Counter>\Memory\Pool Paged Resident Bytes</Counter>
 		<Counter>\Memory\System Cache Resident Bytes</Counter>
+		<Counter>\Memory\Transition Pages RePurposed/sec</Counter>
 		<Counter>\Network Inspection System\Average inspection latency (sec/bytes)</Counter>
 		<Counter>\Network Interface(*)\Bytes Received/sec</Counter>
 		<Counter>\Network Interface(*)\Bytes Sent/sec</Counter>
@@ -155,11 +160,15 @@
 		<CounterDisplayName>\Memory\Committed Bytes</CounterDisplayName>
 		<CounterDisplayName>\Memory\Free &amp; Zero Page List Bytes</CounterDisplayName>
 		<CounterDisplayName>\Memory\Free System Page Table Entries</CounterDisplayName>
+		<CounterDisplayName>\Memory\Long-Term Average Standby Cache Lifetime (s)</CounterDisplayName>
+		<CounterDisplayName>\Memory\Pages Input/sec</CounterDisplayName>
+		<CounterDisplayName>\Memory\Pages Output/sec</CounterDisplayName>
 		<CounterDisplayName>\Memory\Pages/sec</CounterDisplayName>
 		<CounterDisplayName>\Memory\Pool Nonpaged Bytes</CounterDisplayName>
 		<CounterDisplayName>\Memory\Pool Paged Bytes</CounterDisplayName>
 		<CounterDisplayName>\Memory\Pool Paged Resident Bytes</CounterDisplayName>
 		<CounterDisplayName>\Memory\System Cache Resident Bytes</CounterDisplayName>
+		<CounterDisplayName>\Memory\Transition Pages RePurposed/sec</CounterDisplayName>
 		<CounterDisplayName>\Network Inspection System\Average inspection latency (sec/bytes)</CounterDisplayName>
 		<CounterDisplayName>\Network Interface(*)\Bytes Received/sec</CounterDisplayName>
 		<CounterDisplayName>\Network Interface(*)\Bytes Sent/sec</CounterDisplayName>
