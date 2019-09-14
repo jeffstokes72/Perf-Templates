@@ -1,0 +1,90 @@
+<#
+.SYNOPSIS
+This script will perform a windows performance recorder data collection.
+
+.DESCRIPTION
+This script will perform a windows performance recorder data collection.
+
+.PARAMETER WprPath
+Enter the path to wpr.exe.
+
+.PARAMETER TraceFolder
+Enter the folder to store the collected trace data
+
+.PARAMETER TraceFileName
+Enter the file name of the collected trace.
+
+.PARAMETER cpu
+Starts CPU tracing with wpr collection
+
+.PARAMETER minifilter
+Starts minifilter tracing with wpr collection
+
+.PARAMETER diskio
+Starts diskio tracing with wpr collection
+
+.PARAMETER Seconds
+Enter the duration in seconds for the wpr data collection.
+
+.PARAMETER OpenFolder
+Opens the $TraceFolder in Explorer upon completion.
+
+.EXAMPLE
+.\Collect-Wpr.ps1 -CPU -minifilter -diskio
+Performs a wpr collection with CPU, minifilter, and diskio for ten seconds.
+
+.EXAMPLE
+.\Collect-Wpr.ps1 -CPU -minifilter -diskio -Seconds 600 -WprPath D:\WPR\wpr.exe
+Performs a wpr collection using a specified path to wpr.exe for 600 seconds.
+
+.NOTES
+Created by: Jason Wasser @wasserja
+Modified: 9/13/2019 12:55:26 PM 
+#>
+param (
+    [string]$WprPath = 'C:\Windows\System32\wpr.exe',
+    [string]$TraceFolder = 'C:\WPRTemp',
+    [string]$TraceFileName = "$($env:ComputerName)_trace_$(Get-Date -Format yyyyMMddHHmm).etl",
+    [switch]$cpu,
+    [switch]$minifilter,
+    [switch]$diskio, 
+    [int]$Seconds = 120,
+    [switch]$OpenFolder
+)
+
+if (!(Test-Path $WprPath)) {
+    Write-Error "Unable to find wpr.exe at $WprPath"
+    return
+}
+
+if (!(Test-Path $TraceFolder)) {
+    Write-Host "$TraceFolder does not exist. Creating now."
+    New-Item -Path $TraceFolder -ItemType 'directory' | Out-Null
+}
+[string]$wprarguments = ''
+if ($cpu) {
+    $wprarguments += '-start CPU '
+}
+if ($minifilter) {
+    $wprarguments += '-start minifilter '
+}
+if ($diskio) {
+    $wprarguments += '-start diskio '
+}
+
+if ($wprarguments -eq '') {
+    Write-Host "No wpr arguments provided. Defaulting to cpu"
+    $wprarguments = '-start CPU '
+}
+
+Write-Host "Beginning Windows Performance Recorder now: $WprPath $wprarguments"
+Invoke-Expression -Command "$WprPath $wprarguments"
+Write-Host "Sleeping for $Seconds seconds"
+Start-Sleep -Seconds $Seconds
+Write-Host "Stopping trace and writing file to $TraceFolder\$TraceFileName. This may take several minutes."
+Invoke-Expression -Command "$WprPath -stop $TraceFolder\$TraceFileName"
+Write-Host "Trace file saved: $TraceFolder\$TraceFileName"
+if ($OpenFolder) {
+    Write-Host "Opening $TraceFolder now."
+    Invoke-Item $TraceFolder
+}
