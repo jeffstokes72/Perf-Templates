@@ -1,0 +1,15 @@
+Using XPERF to capture slow logons
+1.	Logon as an Administrator of the computer you want to trace (either a local Administrator or Domain Admin account that is a member of the local machine's Administrators group).
+2.	Open an elevated command prompt and run this command from WPT Install directory (default path is C:\Program Files\Microsoft Windows Performance Toolkit. 
+xperf -on base+latency+dispatcher+NetworkTrace+Registry+FileIO -stackWalk CSwitch+ReadyThread+ThreadCreate+Profile -BufferSize 256 -start UserTrace -on "Microsoft-Windows-Shell-Core+Microsoft-Windows-Wininit+Microsoft-Windows-Folder Redirection+Microsoft-Windows-User Profiles Service+Microsoft-Windows-GroupPolicy+Microsoft-Windows-Winlogon+Microsoft-Windows-Security-Kerberos+Microsoft-Windows-User Profiles General+e5ba83f6-07d0-46b1-8bc7-7e669a1d31dc+63b530f8-29c9-4880-a5b4-b8179096e7b8+2f07e2ee-15db-40f1-90ef-9d7ba282188a"  -BufferSize 1024 -MinBuffers 512 -MaxBuffers 1024 -MaxFile 4096
+Note: This syntax works on Windows Vista (Windows Server 2008) and Windows 7 (Windows Server 2008 R2) computers
+3.	Press CTRL+ALT+DEL and then Switch User.
+4.	Logon with the user account experiencing the slow user logon to reproduce the issue.
+5.	Stop the trace. While logged on with the slow user account, open an elevated CMD prompt and type:   
+xperf -stop -stop UserTrace -d merged.etl
+Close the slow logon user session and the admin logon session opened in step 2 as required.
+IMPORTANT: The double “-stop” call in step 5 is not a typo but is required. The first "-stop" terminates kernel tracing. The second "-stop" terminates user mode tracing. Trust us.
+Note: You can also stop the trace by using Switch User to return to the admin user logon established in step #2 and running the same XPERF stop command in the elevated command prompt used to start the trace. This results in a larger, longer trace and requires that you discern the different logons encapsulated in the trace. 
+6.	Send the MERGED.ETL file to Microsoft or an Independent Solution Vendor (ISV) for analysis, or review it yourself.
+By default, the MERGED.ETL file will exist in the XPERF installation directory, which by default is %systemdrive%\program files\microsoft windows performance toolkit directory or if you followed our recommendations early in the doc, the c:\XPERF directory (that is, the XPERF installation directory).
+ Optional: Follow KB 315231   to enable automatic logon.
