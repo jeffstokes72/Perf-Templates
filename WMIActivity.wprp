@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="Yong Rhee" Copyright="Microsoft Corporation" Company="Microsoft Corporation">
+  <Profiles>
+    <EventCollector Id="EventCollector_WMIActivity" Name="WMIActivity">
+      <BufferSize Value="64" />
+      <Buffers Value="320" />
+    </EventCollector>
+    <EventProvider Id="EventProvider_Microsoft-Windows-WMI-Activity" Name="Microsoft-Windows-WMI-Activity" Stack="true" Level="255">
+      <Keywords>
+        <Keyword Value="0xFFFFFFFFFFFFFFFF" />
+      </Keywords>
+    </EventProvider>
+    <EventProvider Id="EventProvider_WMI_Tracing" Name="WMI_Tracing" Stack="true" Level="255">
+      <Keywords>
+        <Keyword Value="0xFFFFFFFFFFFFFFFF" />
+      </Keywords>
+    </EventProvider>
+    <Profile Id="WMIActivity.Verbose.File" Name="WMIActivity" Description="WMI Activity" LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <EventCollectorId Value="EventCollector_WMIActivity">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_Microsoft-Windows-WMI-Activity" />
+            <EventProviderId Value="EventProvider_WMI_Tracing" />
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="WMIActivity.Verbose.Memory" Name="WMIActivity" Description="WMI Activity" Base="WMIActivity.Verbose.File" LoggingMode="Memory" DetailLevel="Verbose" />
+  </Profiles>
+</WindowsPerformanceRecorder>
