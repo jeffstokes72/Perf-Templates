@@ -1,0 +1,5 @@
+$oWMI=get-wmiobject -Namespace root -Class __ProviderHostQuotaConfiguration$oWMI.MemoryPerHost=1024*1024*1024$oWMI.MemoryAllHosts=2048*1024*1024$oWMI.HandlesPerHost=6144$oWMI.put()
+
+Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\Winmgmt -Name 'Group' -Value 'COM Infrastructure'
+
+winmgmt /standalonehost
