@@ -436,7 +436,20 @@ foreach ($file in $blgFiles) {
     </body></html>
 "@
     $sourceToken = ConvertTo-SafeFileToken (([System.IO.Path]::ChangeExtension($relativeSourcePath, $null)) -replace "[\\/]", "_")
-    $reportName = "{0}_{1}_Analysis.html" -f (ConvertTo-SafeFileToken $hostName), $sourceToken
+    # Append a short hash of the original relative path to avoid collisions when
+    # different paths normalise to the same token, and truncate the token so the
+    # resulting filename stays within the NTFS 255-character component limit.
+    $pathHash = [System.BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($relativeSourcePath)
+        )
+    ).Replace("-","").Substring(0,8).ToLower()
+    $safeHost = ConvertTo-SafeFileToken $hostName
+    $fixedLen = $safeHost.Length + 1 + 1 + $pathHash.Length + "_Analysis.html".Length   # host _ token _ hash suffix
+    $maxTokenLen = 255 - $fixedLen
+    if ($maxTokenLen -lt 1) { $maxTokenLen = 1 }
+    if ($sourceToken.Length -gt $maxTokenLen) { $sourceToken = $sourceToken.Substring(0, $maxTokenLen) }
+    $reportName = "{0}_{1}_{2}_Analysis.html" -f $safeHost, $sourceToken, $pathHash
     $reportPath = Join-Path $ReportDir $reportName
     $htmlBody | Out-File -FilePath $reportPath
     $masterSummary.Add([PSCustomObject]@{
