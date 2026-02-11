@@ -50,6 +50,13 @@ function ConvertTo-SafeDouble ($Value) {
     try { return [double]$Value } catch { return 0.0 }
 }
 
+function Get-CounterSampleValueOrNull ($Sample) {
+    if ($null -eq $Sample) { return $null }
+
+    # Invalid samples throw when CookedValue is accessed; skip those only.
+    try { return ConvertTo-SafeDouble $Sample.CookedValue } catch { return $null }
+}
+
 function Get-ProcessCounterSourceRank ($CounterPath) {
     if ($CounterPath -like "*\Process V2(*)*") { return 2 }
     if ($CounterPath -like "*\Process(*)*") { return 1 }
@@ -186,14 +193,31 @@ foreach ($file in $blgFiles) {
     }
 
     # 4. Import Data from normalized BLG
+    $counterData = $null
+    $importIssues = @()
     try {
-        $counterData = Import-Counter -Path $normalizedPath -ErrorAction Stop
-        Write-Log "  -> Successfully imported relog-normalized data." "SUCCESS"
+        # Use tolerant import so one invalid sample does not discard the entire capture.
+        $counterData = Import-Counter -Path $normalizedPath -ErrorAction SilentlyContinue -ErrorVariable +importIssues
     } catch {
-        Write-Log "  -> FAILED to read normalized data structure. Reason: $($_.Exception.Message)" "ERROR"
+        $importIssues += $_
+    }
+
+    if (-not $counterData -or $counterData.Count -eq 0) {
+        $importMsg = "No samples were returned."
+        if ($importIssues.Count -gt 0) {
+            $importMsg = (($importIssues | ForEach-Object { $_.Exception.Message } | Select-Object -First 1) -replace "\s+", " ").Trim()
+        }
+        Write-Log "  -> FAILED to read normalized data structure. Reason: $importMsg" "ERROR"
         Remove-Item -LiteralPath $bufferPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $normalizedPath -Force -ErrorAction SilentlyContinue
         continue
+    }
+
+    if ($importIssues.Count -gt 0) {
+        $warnMsg = (($importIssues | ForEach-Object { $_.Exception.Message } | Select-Object -First 1) -replace "\s+", " ").Trim()
+        Write-Log "  -> Imported with counter warnings. Invalid samples will be skipped. $warnMsg" "WARN"
+    } else {
+        Write-Log "  -> Successfully imported relog-normalized data." "SUCCESS"
     }
 
     # Clean up intermediate files immediately
@@ -236,19 +260,24 @@ foreach ($file in $blgFiles) {
         $intervalProcBest = @{}
 
         foreach ($s in $sampleSet.CounterSamples) {
-            if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = ConvertTo-SafeDouble $s.CookedValue }
-            if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = ConvertTo-SafeDouble $s.CookedValue }
+            $samplePath = $s.Path
+            if ([string]::IsNullOrWhiteSpace($samplePath)) { continue }
+            $sampleValue = Get-CounterSampleValueOrNull $s
 
-            if ($s.Path -like "*\Process(*)*" -or $s.Path -like "*\Process V2(*)*") {
-                $pidName = ([regex]::Match($s.Path, "\((.*?)\)")).Groups[1].Value
+            if ($samplePath -like "*VM Processor(_Total)\CPU stolen time" -and $null -ne $sampleValue) { $intervalStolen = [double]$sampleValue }
+            if ($samplePath -like "*PhysicalDisk(_Total)\Disk Transfers/sec" -and $null -ne $sampleValue) { $intervalIops = [double]$sampleValue }
+
+            if ($samplePath -like "*\Process(*)*" -or $samplePath -like "*\Process V2(*)*") {
+                if ($null -eq $sampleValue) { continue }
+                $pidName = ([regex]::Match($samplePath, "\((.*?)\)")).Groups[1].Value
                 if ([string]::IsNullOrWhiteSpace($pidName) -or $pidName -match "_Total|Idle") { continue }
 
                 $metric = $null
-                if ($s.Path -like "*% Processor Time") { $metric = "CPU" }
-                elseif ($s.Path -like "*% Privileged Time") { $metric = "Priv" }
-                elseif ($s.Path -like "*% User Time") { $metric = "User" }
-                elseif ($s.Path -like "*Private Bytes") { $metric = "Mem" }
-                elseif ($s.Path -like "*Priority Base") { $metric = "Prio" }
+                if ($samplePath -like "*% Processor Time") { $metric = "CPU" }
+                elseif ($samplePath -like "*% Privileged Time") { $metric = "Priv" }
+                elseif ($samplePath -like "*% User Time") { $metric = "User" }
+                elseif ($samplePath -like "*Private Bytes") { $metric = "Mem" }
+                elseif ($samplePath -like "*Priority Base") { $metric = "Prio" }
                 if (-not $metric) { continue }
 
                 if (-not $intervalProcBest.ContainsKey($pidName)) {
@@ -261,7 +290,7 @@ foreach ($file in $blgFiles) {
                     }
                 }
 
-                $sourceRank = Get-ProcessCounterSourceRank $s.Path
+                $sourceRank = Get-ProcessCounterSourceRank $samplePath
                 $rankKey = "{0}_Rank" -f $metric
                 $entry = $intervalProcBest[$pidName]
 
@@ -270,7 +299,7 @@ foreach ($file in $blgFiles) {
                     elseif ($sourceRank -le $entry[$rankKey]) { continue }
                 }
 
-                $entry[$metric] = ConvertTo-SafeDouble $s.CookedValue
+                $entry[$metric] = [double]$sampleValue
                 $entry[$rankKey] = $sourceRank
             }
         }
