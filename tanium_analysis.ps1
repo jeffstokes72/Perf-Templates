@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
     Professional Tanium & VMware Performance Utility.
-    Version: 12.5
+    Version: 12.6
 
 .DESCRIPTION
     - Fixes: Handles filenames with special chars ( ) [ ] by using a safe processing buffer.
     - Fixes: Normalizes BLG input with relog.exe (better Process V2 compatibility).
+    - Fixes: Recursively discovers BLG files under Source and supports duplicate names.
     - Fixes: De-duplicates overlapping Process and Process V2 interval metrics.
     - Fixes: Skips 0-byte (empty) files automatically.
     - Diagnostics: Contention Score, K/U Ratio, Memory Slope, Priority.
@@ -27,7 +28,7 @@ foreach ($path in @($BaseDir, $SourceDir, $ReportDir, $TempDir)) {
 
 # Initialize Log
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.5) ==="
+Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.6) ==="
 
 $masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
 
@@ -55,6 +56,14 @@ function Get-CounterSampleValueOrNull ($Sample) {
 
     # Invalid samples throw when CookedValue is accessed; skip those only.
     try { return ConvertTo-SafeDouble $Sample.CookedValue } catch { return $null }
+}
+
+function ConvertTo-SafeFileToken ($Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "Unknown" }
+    $safe = $Value -replace "[^A-Za-z0-9._-]+", "_"
+    $safe = $safe.Trim("_")
+    if ([string]::IsNullOrWhiteSpace($safe)) { return "Unknown" }
+    return $safe
 }
 
 function Get-ProcessCounterSourceRank ($CounterPath) {
@@ -168,12 +177,18 @@ if (-not $script:ResolvedRelogExe) {
 }
 Write-Log "Using relog executable: $script:ResolvedRelogExe" "INFO"
 
-$blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg"
+$blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg" -File -Recurse | Sort-Object FullName
 
 if ($blgFiles.Count -eq 0) { Write-Log "No .blg files found!" "ERROR"; exit }
+$blgDirs = $blgFiles | Select-Object -ExpandProperty DirectoryName -Unique
+Write-Log "Discovered $($blgFiles.Count) BLG file(s) across $($blgDirs.Count) source folder(s)." "INFO"
 
 foreach ($file in $blgFiles) {
-    Write-Log "Found: $($file.Name)" "INFO"
+    $relativeSourcePath = $file.FullName
+    if ($relativeSourcePath.StartsWith($SourceDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $relativeSourcePath = ($relativeSourcePath.Substring($SourceDir.Length) -replace "^[\\/]+", "")
+    }
+    Write-Log "Found: $relativeSourcePath" "INFO"
 
     # 1. Zero-Byte Check
     if ($file.Length -eq 0) {
@@ -182,7 +197,7 @@ foreach ($file in $blgFiles) {
     }
 
     # 2. Safe Buffer Copy (Sanitizes Filename)
-    $safeName = "safe_buffer_$($file.BaseName.GetHashCode()).blg"
+    $safeName = "safe_buffer_{0}.blg" -f ([Guid]::NewGuid().ToString("N"))
     $bufferPath = Join-Path $TempDir $safeName
     $normalizedPath = Join-Path $TempDir ("normalized_{0}.blg" -f [Guid]::NewGuid().ToString("N"))
 
@@ -420,8 +435,18 @@ foreach ($file in $blgFiles) {
         </div>
     </body></html>
 "@
-    $htmlBody | Out-File (Join-Path $ReportDir "$hostName`_Analysis.html")
-    $masterSummary.Add([PSCustomObject]@{ HostName = $hostName; Contention = $score; Fidelity = "$($avgInterval)s"; Status = if ($score -gt 0.7) { "Critical" } else { "Healthy" } })
+    $sourceToken = ConvertTo-SafeFileToken (([System.IO.Path]::ChangeExtension($relativeSourcePath, $null)) -replace "[\\/]", "_")
+    $reportName = "{0}_{1}_Analysis.html" -f (ConvertTo-SafeFileToken $hostName), $sourceToken
+    $reportPath = Join-Path $ReportDir $reportName
+    $htmlBody | Out-File -FilePath $reportPath
+    $masterSummary.Add([PSCustomObject]@{
+            HostName   = $hostName
+            SourceFile = $relativeSourcePath
+            ReportFile = $reportName
+            Contention = $score
+            Fidelity   = "$($avgInterval)s"
+            Status     = if ($score -gt 0.7) { "Critical" } else { "Healthy" }
+        })
 }
 
 $masterSummary | Export-Csv $SummaryFile -NoTypeInformation
