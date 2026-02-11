@@ -1,29 +1,51 @@
 <#
 .SYNOPSIS
     Professional Tanium & VMware Performance Utility.
-    Version: 12.1
-    
+    Version: 12.3
+
 .DESCRIPTION
-    - Full Lifecycle: Native BLG Parsing -> Host Grouping -> Analytics -> HTML Reporting.
-    - Non-Admin: Uses native Get-Counter. No relog.exe required.
+    - Fixes: Handles filenames with special chars ( ) [ ] by using a safe processing buffer.
+    - Fixes: Skips 0-byte (empty) files automatically.
     - Diagnostics: Contention Score, K/U Ratio, Memory Slope, Priority.
-    - Features: Actionable Insights & Reference Library restored.
 #>
 
 # --- CONFIGURATION ---
 $BaseDir      = "C:\TaniumPerformanceAnalysis"
 $SourceDir    = "$BaseDir\Source"
 $ReportDir    = "$BaseDir\Reports"
+$TempDir      = "$BaseDir\Temp"
+$LogFile      = "$BaseDir\Analysis_Log.txt"
 $SummaryFile  = Join-Path $ReportDir "Fleet_Contention_Summary.csv"
 
 # Ensure Directory Structure
-if (!(Test-Path $BaseDir))   { New-Item -ItemType Directory -Path $BaseDir | Out-Null }
-if (!(Test-Path $SourceDir)) { New-Item -ItemType Directory -Path $SourceDir | Out-Null }
-if (!(Test-Path $ReportDir)) { New-Item -ItemType Directory -Path $ReportDir | Out-Null }
+foreach ($path in @($BaseDir, $SourceDir, $ReportDir, $TempDir)) {
+    if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+}
+
+# Initialize Log
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.3) ==="
 
 $masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
 
-# --- MATH HELPERS ---
+# --- HELPERS ---
+
+function Write-Log ($Message, $Level = "INFO") {
+    $time = Get-Date -Format "HH:mm:ss"
+    $logMsg = "[$time] [$Level] $Message"
+    Add-Content -Path $LogFile -Value $logMsg
+    switch ($Level) {
+        "ERROR" { Write-Host $logMsg -ForegroundColor Red }
+        "WARN" { Write-Host $logMsg -ForegroundColor Yellow }
+        "INFO" { Write-Host $logMsg -ForegroundColor Gray }
+        "SUCCESS" { Write-Host $logMsg -ForegroundColor Green }
+    }
+}
+
+function ConvertTo-SafeDouble ($Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 0.0 }
+    try { return [double]$Value } catch { return 0.0 }
+}
 
 function Get-ContentionScore ($listA, $listB) {
     if ($listA.Count -lt 2 -or $listB.Count -lt 2) { return 0.0 }
@@ -43,12 +65,12 @@ function Get-ContentionScore ($listA, $listB) {
 
 function Get-TrendSlope ($yValues) {
     $n = $yValues.Count
-    if ($n -lt 10) { return 0 } 
+    if ($n -lt 10) { return 0 }
     $sumX = 0; $sumY = 0; $sumXY = 0; $sumX2 = 0
     for ($x = 0; $x -lt $n; $x++) {
         $y = [double]$yValues[$x]
-        $sumX  += $x
-        $sumY  += $y
+        $sumX += $x
+        $sumY += $y
         $sumXY += ($x * $y)
         $sumX2 += ($x * $x)
     }
@@ -57,19 +79,43 @@ function Get-TrendSlope ($yValues) {
 }
 
 # --- STAGE 1: PROCESSING BLG FILES ---
-Write-Host "--- STAGE 1: Processing BLG Files (Non-Admin Mode) ---" -ForegroundColor Cyan
+Write-Log "Scanning $SourceDir for BLG files..." "INFO"
 $blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg"
 
+if ($blgFiles.Count -eq 0) { Write-Log "No .blg files found!" "ERROR"; exit }
+
 foreach ($file in $blgFiles) {
-    Write-Host "Reading $($file.Name)..." -ForegroundColor Gray
-    
-    # Import Data Natively
-    try {
-        $counterData = Import-Counter -Path $file.FullName -ErrorAction Stop
-    } catch {
-        Write-Warning "Could not read $($file.Name). Ensure file is valid and unlocked."
+    Write-Log "Found: $($file.Name)" "INFO"
+
+    # 1. Zero-Byte Check
+    if ($file.Length -eq 0) {
+        Write-Log "  -> SKIPPING: File is 0 KB (Empty). Capture likely failed or initialized without data." "WARN"
         continue
     }
+
+    # 2. Safe Buffer Copy (Sanitizes Filename)
+    $safeName = "safe_buffer_$($file.BaseName.GetHashCode()).blg"
+    $bufferPath = Join-Path $TempDir $safeName
+
+    try {
+        Copy-Item -LiteralPath $file.FullName -Destination $bufferPath -Force -ErrorAction Stop
+    } catch {
+        Write-Log "  -> SKIPPING: File Locked. Could not copy to buffer. $($_.Exception.Message)" "ERROR"
+        continue
+    }
+
+    # 3. Import Data from Safe Buffer
+    try {
+        $counterData = Import-Counter -Path $bufferPath -ErrorAction Stop
+        Write-Log "  -> Successfully imported data." "SUCCESS"
+    } catch {
+        Write-Log "  -> FAILED to read data structure. Reason: $($_.Exception.Message)" "ERROR"
+        Remove-Item $bufferPath -Force -ErrorAction SilentlyContinue
+        continue
+    }
+
+    # Clean up buffer immediately
+    Remove-Item $bufferPath -Force -ErrorAction SilentlyContinue
 
     # Determine Hostname
     $samplePath = $counterData[0].CounterSamples[0].Path
@@ -77,35 +123,34 @@ foreach ($file in $blgFiles) {
 
     # Fidelity Check
     $timeStamps = $counterData.Timestamp
-    $intervals = for($i=1; $i -lt $timeStamps.Count; $i++) { ($timeStamps[$i] - $timeStamps[$i-1]).TotalSeconds }
+    $intervals = for ($i = 1; $i -lt $timeStamps.Count; $i++) { ($timeStamps[$i] - $timeStamps[$i - 1]).TotalSeconds }
     $avgInterval = [Math]::Round(($intervals | Measure-Object -Average).Average, 1)
+
+    if ($avgInterval -gt 15) { Write-Log "  -> Low Fidelity Warning: Sampling interval is $($avgInterval)s" "WARN" }
 
     # Initialize Containers
     $stolenList = New-Object System.Collections.Generic.List[double]
-    $iopsList   = New-Object System.Collections.Generic.List[double]
+    $iopsList = New-Object System.Collections.Generic.List[double]
     $tanAggList = New-Object System.Collections.Generic.List[double]
-    $procData   = @{}
+    $procData = @{}
 
     # Iterate Samples
     foreach ($sampleSet in $counterData) {
         $intervalStolen = 0
-        $intervalIops   = 0
+        $intervalIops = 0
         $intervalTanSum = 0
 
         foreach ($s in $sampleSet.CounterSamples) {
-            # System Metrics
             if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = $s.CookedValue }
             if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = $s.CookedValue }
 
-            # Process Metrics
             if ($s.Path -like "*\Process(*)*") {
                 $pidName = ([regex]::Match($s.Path, "\((.*?)\)")).Groups[1].Value
                 if ($pidName -match "_Total|Idle") { continue }
-                
-                if (!$procData[$pidName]) { $procData[$pidName] = @{ CPU=@(); Priv=@(); User=@(); Mem=@(); Prio=@() } }
+                if (!$procData[$pidName]) { $procData[$pidName] = @{ CPU = @(); Priv = @(); User = @(); Mem = @(); Prio = @() } }
 
-                if ($s.Path -like "*% Processor Time") { 
-                    $procData[$pidName].CPU += $s.CookedValue 
+                if ($s.Path -like "*% Processor Time") {
+                    $procData[$pidName].CPU += $s.CookedValue
                     if ($pidName -match "Tanium") { $intervalTanSum += $s.CookedValue }
                 }
                 if ($s.Path -like "*% Privileged Time") { $procData[$pidName].Priv += $s.CookedValue }
@@ -136,7 +181,7 @@ foreach ($file in $blgFiles) {
 
     $score = Get-ContentionScore $stolenList $tanAggList
 
-    # --- ACTIONABLE INSIGHTS LOGIC ---
+    # --- INSIGHTS ---
     $insights = New-Object System.Collections.Generic.List[string]
     if ($avgInterval -gt 15) { $insights.Add("<strong style='color:#d9534f;'>Low Fidelity Warning:</strong> Sampling interval is $($avgInterval)s. Burst activity may be aliased.") }
     if ($stolenList.Count -eq 0 -or ($stolenList | Measure-Object -Sum).Sum -eq 0) { $insights.Add("<strong>Data Gap:</strong> VMware counters missing or zero. Validate VMware Tools.") }
@@ -147,14 +192,14 @@ foreach ($file in $blgFiles) {
 
     # --- STAGE 3: HTML REPORT ---
     $scoreColor = if ($score -gt 0.7) { "#d9534f" } elseif ($score -gt 0.4) { "#f0ad4e" } else { "#5cb85c" }
-    $tanRows = ($processSummary | Where-Object IsTan | Sort-Object AvgCPU -Descending | ForEach-Object { 
-        $lStyle = if ($_.MemSlope -gt 0.5) { "background:#ffcccc;" } else { "" }
-        $kStyle = if ($_.KURatio -gt 0.3)  { "color:red; font-weight:bold;" } else { "" }
-        "<tr style='$lStyle'><td>$($_.PID)</td><td>$($_.AvgCPU)%</td><td style='$kStyle'>$($_.KURatio)</td><td>$($_.BasePrio)</td><td>$($_.MemSlope) MB/inc</td><td>$($_.PeakMemMB) MB</td></tr>" 
-    }) -join ""
-    
-    $pieRows  = ($processSummary | Sort-Object AvgCPU -Descending | Select-Object -First 12 | ForEach-Object { "['$($_.PID)', $($_.AvgCPU)]" }) -join ","
-    $lineRows = for($i=0; $i -lt $stolenList.Count; $i++) { "['$($timeStamps[$i].ToString("HH:mm:ss"))', $($stolenList[$i]), $($iopsList[$i])]" }
+    $tanRows = ($processSummary | Where-Object IsTan | Sort-Object AvgCPU -Descending | ForEach-Object {
+            $lStyle = if ($_.MemSlope -gt 0.5) { "background:#ffcccc;" } else { "" }
+            $kStyle = if ($_.KURatio -gt 0.3) { "color:red; font-weight:bold;" } else { "" }
+            "<tr style='$lStyle'><td>$($_.PID)</td><td>$($_.AvgCPU)%</td><td style='$kStyle'>$($_.KURatio)</td><td>$($_.BasePrio)</td><td>$($_.MemSlope) MB/inc</td><td>$($_.PeakMemMB) MB</td></tr>"
+        }) -join ""
+
+    $pieRows = ($processSummary | Sort-Object AvgCPU -Descending | Select-Object -First 12 | ForEach-Object { "['$($_.PID)', $($_.AvgCPU)]" }) -join ","
+    $lineRows = for ($i = 0; $i -lt $stolenList.Count; $i++) { "['$($timeStamps[$i].ToString("HH:mm:ss"))', $($stolenList[$i]), $($iopsList[$i])]" }
 
     $htmlBody = @"
     <html>
@@ -169,7 +214,7 @@ foreach ($file in $blgFiles) {
             });
         </script>
         <style>
-            body{font-family:'Segoe UI',sans-serif;background:#f4f7f6;margin:30px} 
+            body{font-family:'Segoe UI',sans-serif;background:#f4f7f6;margin:30px}
             .card{background:white;padding:25px;border-radius:10px;box-shadow:0 4px 6px rgba(0,0,0,0.1);margin-bottom:20px; border-left:10px solid $scoreColor;}
             .insight-box { background: #fdfdfe; border: 1px solid #d1d1d1; padding: 15px; border-radius: 5px; margin: 10px 0; }
             table{width:100%;border-collapse:collapse;margin-top:15px;}
@@ -186,7 +231,7 @@ foreach ($file in $blgFiles) {
                 <div id="g" style="width:200px;height:150px"></div>
                 <div style="margin-left:20px"><span style="font-size:2.5em;font-weight:bold;color:$scoreColor">$score</span><br/>Contention Score (Sampling: $($avgInterval)s)</div>
             </div>
-            
+
             <div class="insight-box">
                 <strong>Observations & Opportunities:</strong>
                 <ul><li>$($insights -join "</li><li>")</li></ul>
@@ -194,7 +239,7 @@ foreach ($file in $blgFiles) {
 
             <div style="display:flex;"><div id="p" style="width:40%;height:400px"></div><div id="l" style="width:60%;height:400px"></div></div>
             <table><thead><tr><th>PID</th><th>Avg CPU</th><th>K/U Ratio</th><th>Base Prio</th><th>Mem Slope</th><th>Peak MB</th></tr></thead><tbody>$tanRows</tbody></table>
-            
+
             <div class="ref-box">
                 <strong>Technical Reference Library:</strong><br/><br/>
                 • <strong>K/U Ratio:</strong> <a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-high-cpu-usage-privileged-time" target="_blank">Troubleshoot High Privileged Time</a><br/>
@@ -205,8 +250,8 @@ foreach ($file in $blgFiles) {
     </body></html>
 "@
     $htmlBody | Out-File (Join-Path $ReportDir "$hostName`_Analysis.html")
-    $masterSummary.Add([PSCustomObject]@{ HostName=$hostName; Contention=$score; Fidelity="$($avgInterval)s"; Status=if($score -gt 0.7){"Critical"}else{"Healthy"} })
+    $masterSummary.Add([PSCustomObject]@{ HostName = $hostName; Contention = $score; Fidelity = "$($avgInterval)s"; Status = if ($score -gt 0.7) { "Critical" } else { "Healthy" } })
 }
 
 $masterSummary | Export-Csv $SummaryFile -NoTypeInformation
-Write-Host "Analysis Complete. Reports located in: $ReportDir" -ForegroundColor Green
+Write-Log "Analysis Complete. Reports located in: $ReportDir" "SUCCESS"
