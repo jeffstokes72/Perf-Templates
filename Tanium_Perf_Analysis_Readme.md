@@ -1,38 +1,46 @@
-# Tanium & VMware Performance Quality Analyzer
+# Tanium & VMware Performance Quality Analyzer (v11.1)
 
 ## Overview
-This utility is designed for **Principal Escalation Engineers** and performance specialists to conduct root cause analysis (RCA) on Windows workloads running as VMware guests. It specifically focuses on identifying resource contention between Tanium client operations and hypervisor scheduling.
+This utility is a professional diagnostic tool designed to resolve complex performance escalations in VMware Guest OS environments. It specifically correlates **Tanium Client** and **TaniumCX** child process activity with hypervisor-level scheduling health.
 
-## Key Features
-- **Automated Processing**: Batch converts `.blg` files to CSV and groups data by Hostname.
-- **PID-Level Tracking**: Leverages the "pidness" format to track individual Tanium processes (Client vs. CX containers).
-- **Contention Scoring**: A proprietary correlation metric linking application bursts to VMware "Ready Time" (Stolen Time).
-- **AV Interference Detection**: Calculates Kernel-to-User (K/U) ratios to identify filter driver hooking.
-- **Leak Detection**: Uses linear regression to calculate memory slopes (Private Bytes growth) over time.
+## Core Diagnostic Logic
 
-
-
-## Diagnostic Metrics Explained
-
-### Contention Score (0.0 - 1.0)
-Measures the mathematical correlation between Tanium CPU bursts and hypervisor scheduling delays.
-- **> 0.7**: Direct Contention. Application workload is clashing with host core availability.
-- **< 0.4**: Healthy. Workload is independent of hypervisor scheduling pressure.
-
-### Kernel-to-User (K/U) Ratio
-A high ratio (> 0.3) indicates that for every unit of "User" work, the "Kernel" is working overtime. This is a primary indicator of security software (AV/EDR) intercepting application I/O.
-
-### Memory Slope
-Calculates the rate of change in `Private Bytes`. A positive slope (> 0.5 MB/interval) indicates a steady memory incline, suggesting a potential leak rather than a standard peak.
+### 1. Contention Scoring (Pearson Correlation)
+Identifies causality between workload bursts and hypervisor scheduling delays.
+* **Metric**: Correlation of `Process\% Processor Time` to `VM Processor\CPU stolen time`.
+* **Interpretation**: A score above **0.7** indicates that Guest OS activity is directly competing for physical CPU cycles, leading to scheduling wait states (Ready Time).
 
 
-## Getting Started
-1. Place all `.blg` files in `C:\PerfLogs\Source`.
-2. Execute the PowerShell script.
-3. Review `Fleet_Contention_Summary.csv` for high-level triage.
-4. Open individual HTML reports for peer-friendly, actionable insights.
+
+### 2. Kernel-to-User (K/U) Ratio
+A primary indicator of filter driver interference (AV, EDR, DLP, or Indexers).
+* **Logic**: `Privileged Time / User Time`.
+* **Benchmark**: Ratios exceeding **0.3** suggest the OS kernel is expending excessive resources to support application I/O, often pointing to a security software exclusion failure.
+
+
+
+### 3. Memory Slope Analysis (Leak Detection)
+Detects memory leaks through trend analysis rather than static thresholding.
+* **Logic**: Uses linear regression to calculate the slope of `Private Bytes` over the capture duration.
+* **Flag**: A positive slope exceeding **0.5 MB per interval** indicates a sustained incline in memory consumption.
+
+
+
+### 4. Fidelity Check (Sampling Interval)
+Validates the quality of telemetry.
+* **Criteria**: Sampling intervals greater than **15 seconds** trigger a warning. 
+* **Reasoning**: Coarse telemetry aliases short-lived Tanium sensor bursts, which often complete in 2–5 seconds, potentially leading to false-negative results.
+
+## Usage
+1. **Stage**: Place `.blg` files in `C:\PerfLogs\Source`.
+2. **Run**: Execute the utility via PowerShell (Administrator).
+3. **Review**:
+    - Sort `Fleet_Contention_Summary.csv` by **ContentionScore**.
+    - Open Host-specific HTML reports for interactive charts and "Actionable Insights."
+
+
 
 ## Prerequisites
-- Windows PowerShell 5.1+
-- Administrative privileges (required for the `relog` utility).
-- VMware Tools installed on Guest VMs (for `VM Processor` counters).
+- **Admin Rights**: Required for the `relog.exe` utility.
+- **VMware Tools**: Must be running to provide `VM Processor` counters.
+- **Pidness**: `ProcessNameFormat` registry key must be set to `2` for PID tracking.
