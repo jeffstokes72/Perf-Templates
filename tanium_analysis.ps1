@@ -1,63 +1,45 @@
-# Logic for Health Color and Label
-    $scoreColor = if ($score -gt 0.7) { "#d9534f" } elseif ($score -gt 0.4) { "#f0ad4e" } else { "#5cb85c" }
-    $scoreLabel = if ($score -gt 0.7) { "CRITICAL" } elseif ($score -gt 0.4) { "WARNING" } else { "OPTIMAL" }
+<#
+.SYNOPSIS
+    Analyzes Perfmon BLG files for Tanium CPU consumption and VMware Scheduling Contention.
+    
+.DESCRIPTION
+    1. Converts BLG to CSV using relog with specific counter filters.
+    2. Groups files by Hostname.
+    3. Calculates a "Contention Score" (Correlation between Tanium CPU and VM Ready Time).
+    4. Generates a Master Summary CSV and detailed HTML reports per host.
+#>
 
-    $html = @"
-    <html>
-      <head>
-        <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
-        <script type="text/javascript">
-          google.charts.load('current', {'packages':['corechart', 'gauge']});
-          google.charts.setOnLoadCallback(drawCharts);
-          function drawCharts() {
-            // Contention Gauge
-            var gaugeData = google.visualization.arrayToDataTable([['Label', 'Value'],['Contention', $($score * 100)]]);
-            var gaugeOptions = { width: 400, height: 120, redFrom: 70, redTo: 100, yellowFrom: 40, yellowTo: 70, minorTicks: 5 };
-            new google.visualization.Gauge(document.getElementById('gauge_div')).draw(gaugeData, gaugeOptions);
+# --- CONFIGURATION ---
+$blgFolder    = "C:\PerfLogs\Source"    # Put your 19+ BLG files here
+$csvFolder    = "C:\PerfLogs\Analysis"  # Intermediate CSV storage
+$reportFolder = "C:\PerfLogs\Reports"   # Final HTML and Summary CSV output
+$summaryFile  = Join-Path $reportFolder "Fleet_Contention_Summary.csv"
 
-            // CPU Distribution Pie
-            var pieData = google.visualization.arrayToDataTable([['PID', 'Avg'], $pieRows]);
-            new google.visualization.PieChart(document.getElementById('pie_div')).draw(pieData, {title: 'Process CPU Distribution'});
+# Ensure directories exist
+foreach ($path in @($csvFolder, $reportFolder)) {
+    if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path }
+}
 
-            // Health Over Time Line
-            var lineData = google.visualization.arrayToDataTable([['Time', 'Ready (ms)', 'Eff MHz'], $lineRows]);
-            new google.visualization.LineChart(document.getElementById('line_div')).draw(lineData, {
-              title: 'Hypervisor Health Context',
-              series: { 0: {targetAxisIndex: 0}, 1: {targetAxisIndex: 1} },
-              vAxes: { 0: {title: 'Ready Time'}, 1: {title: 'MHz'} }
-            });
-          }
-        </script>
-        <style>
-          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; margin: 40px; }
-          .header { background: white; padding: 20px; border-radius: 10px; border-left: 10px solid $scoreColor; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-          .score-badge { font-size: 2em; font-weight: bold; color: $scoreColor; }
-          .grid { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
-          .card { background: white; padding: 15px; border-radius: 10px; flex: 1; min-width: 45%; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>Quality Analysis: $hostName</h1>
-          <div style="display: flex; align-items: center;">
-            <div id="gauge_div" style="width: 150px;"></div>
-            <div style="margin-left: 30px;">
-              <span class="score-badge">$score</span> - <strong>$scoreLabel</strong><br/>
-              <em>Correlation between Tanium CPU activity and VMware Ready Time spikes.</em>
-            </div>
-          </div>
-        </div>
-        <div class="grid">
-          <div class="card" id="pie_div" style="height: 400px;"></div>
-          <div class="card" id="line_div" style="height: 400px;"></div>
-        </div>
-        <div class="card" style="margin-top: 20px;">
-          <h2>Tanium PID Performance Table</h2>
-          <table style="width: 100%; border-collapse: collapse;">
-            <thead><tr style="background: #eee;"><th>PID</th><th>Avg CPU</th><th>Peak Burst</th></tr></thead>
-            <tbody>$tanRows</tbody>
-          </table>
-        </div>
-      </body>
-    </html>
-"@
+# --- HELPER FUNCTIONS ---
+
+# Pearson Correlation to determine how much Tanium causes VM Ready Time spikes
+function Get-ContentionScore ($listA, $listB) {
+    $count = $listA.Count
+    if ($count -lt 2) { return 0 }
+    $avgA = ($listA | Measure-Object -Average).Average
+    $avgB = ($listB | Measure-Object -Average).Average
+    $sumNum = 0; $sumDenA = 0; $sumDenB = 0
+    for ($i = 0; $i -lt $count; $i++) {
+        $diffA = $listA[$i] - $avgA
+        $diffB = $listB[$i] - $avgB
+        $sumNum += ($diffA * $diffB)
+        $sumDenA += [Math]::Pow($diffA, 2)
+        $sumDenB += [Math]::Pow($diffB, 2)
+    }
+    $denominator = [Math]::Sqrt($sumDenA * $sumDenB)
+    if ($denominator -eq 0) { return 0 }
+    return [Math]::Round(($sumNum / $denominator), 3)
+}
+
+# --- STAGE 1: RELOG CONVERSION ---
+Write-Host "--- STAGE 1: Converting BLG to CSV
