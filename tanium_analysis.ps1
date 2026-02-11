@@ -1,93 +1,63 @@
-# Setup Paths
-$csvPath = "C:\PerfLogs\Analysis"
-$outputPath = "C:\PerfLogs\Reports"
-if (!(Test-Path $outputPath)) { New-Item -ItemType Directory -Path $outputPath }
+# Logic for Health Color and Label
+    $scoreColor = if ($score -gt 0.7) { "#d9534f" } elseif ($score -gt 0.4) { "#f0ad4e" } else { "#5cb85c" }
+    $scoreLabel = if ($score -gt 0.7) { "CRITICAL" } elseif ($score -gt 0.4) { "WARNING" } else { "OPTIMAL" }
 
-$csvFiles = Get-ChildItem -Path $csvPath -Filter "*.csv"
-
-foreach ($file in $csvFiles) {
-    Write-Host "Processing $hostName Analysis..." -ForegroundColor Cyan
-    $data = Import-Csv $file.FullName
-    $sampleHeader = ($data[0].psobject.Properties.Name | Where-Object { $_ -like "\\*" })[0]
-    $hostName = $sampleHeader.Split('\')[2]
-    
-    # 1. Gather VMware Metrics
-    $vmStats = $data | ForEach-Object {
-        [PSCustomObject]@{
-            Time   = $_."(PDH-CSV 4.0)"
-            Stolen = [double]$_."\\$hostName\VM Processor(_Total)\CPU stolen time"
-            MHz    = [double]$_."\\$hostName\VM Processor(_Total)\Effective VM Speed in MHz"
-        }
-    }
-
-    # 2. Gather Process Metrics with PEAK analysis
-    $procCols = $data[0].psobject.Properties.Name | Where-Object { $_ -like "*Process(*)*% Processor Time*" }
-    $processSummary = foreach ($col in $procCols) {
-        $fullName = ([regex]::Match($col, "\((.*?)\)")).Groups[1].Value
-        if ($fullName -match "_Total|Idle") { continue }
-        
-        $measurements = $data."$col" | Measure-Object -Average -Maximum
-        [PSCustomObject]@{
-            PID    = $fullName
-            Avg    = [Math]::Round($measurements.Average, 2)
-            Peak   = [Math]::Round($measurements.Maximum, 2)
-            IsTan  = $fullName -match "Tanium"
-        }
-    }
-
-    # Data Formatting for HTML
-    $pieRows = ($processSummary | Sort-Object Avg -Descending | Select-Object -First 12 | ForEach-Object { "['$($_.PID)', $($_.Avg)]" }) -join ","
-    $lineRows = ($vmStats | ForEach-Object { "['$($_.Time)', $($_.Stolen), $($_.MHz)]" }) -join ","
-    
-    $taniumTable = $processSummary | Where-Object IsTan | Sort-Object Peak -Descending | ForEach-Object {
-        "<tr><td>$($_.PID)</td><td>$($_.Avg)%</td><td>$($_.Peak)%</td></tr>"
-    }
-
-    # Generate Report
-    $reportFile = Join-Path $outputPath "$hostName`_Full_Analysis.html"
     $html = @"
     <html>
       <head>
         <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
         <script type="text/javascript">
-          google.charts.load('current', {'packages':['corechart', 'line', 'table']});
+          google.charts.load('current', {'packages':['corechart', 'gauge']});
           google.charts.setOnLoadCallback(drawCharts);
           function drawCharts() {
-            var pieData = google.visualization.arrayToDataTable([['PID', 'Avg CPU'], $pieRows]);
-            new google.visualization.PieChart(document.getElementById('pie')).draw(pieData, {title:'Top CPU Consumers (Avg)'});
+            // Contention Gauge
+            var gaugeData = google.visualization.arrayToDataTable([['Label', 'Value'],['Contention', $($score * 100)]]);
+            var gaugeOptions = { width: 400, height: 120, redFrom: 70, redTo: 100, yellowFrom: 40, yellowTo: 70, minorTicks: 5 };
+            new google.visualization.Gauge(document.getElementById('gauge_div')).draw(gaugeData, gaugeOptions);
 
-            var lineData = google.visualization.arrayToDataTable([['Time', 'Stolen', 'MHz'], $lineRows]);
-            new google.visualization.LineChart(document.getElementById('line')).draw(lineData, {
-                title:'VMware Performance Context',
-                vAxes: { 0:{title:'Ready (ms)'}, 1:{title:'MHz'} },
-                series: { 0:{targetAxisIndex:0}, 1:{targetAxisIndex:1} }
+            // CPU Distribution Pie
+            var pieData = google.visualization.arrayToDataTable([['PID', 'Avg'], $pieRows]);
+            new google.visualization.PieChart(document.getElementById('pie_div')).draw(pieData, {title: 'Process CPU Distribution'});
+
+            // Health Over Time Line
+            var lineData = google.visualization.arrayToDataTable([['Time', 'Ready (ms)', 'Eff MHz'], $lineRows]);
+            new google.visualization.LineChart(document.getElementById('line_div')).draw(lineData, {
+              title: 'Hypervisor Health Context',
+              series: { 0: {targetAxisIndex: 0}, 1: {targetAxisIndex: 1} },
+              vAxes: { 0: {title: 'Ready Time'}, 1: {title: 'MHz'} }
             });
           }
         </script>
         <style>
-            body { font-family: 'Segoe UI', sans-serif; margin: 30px; background: #f4f7f6; }
-            .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-            th { background-color: #004b87; color: white; }
-            tr:hover { background-color: #f5f5f5; }
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f8f9fa; margin: 40px; }
+          .header { background: white; padding: 20px; border-radius: 10px; border-left: 10px solid $scoreColor; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+          .score-badge { font-size: 2em; font-weight: bold; color: $scoreColor; }
+          .grid { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+          .card { background: white; padding: 15px; border-radius: 10px; flex: 1; min-width: 45%; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         </style>
       </head>
       <body>
-        <div class="container">
-            <h1>Host: $hostName Analysis</h1>
-            <div style="display: flex;">
-                <div id="pie" style="width: 50%; height: 400px;"></div>
-                <div id="line" style="width: 50%; height: 400px;"></div>
+        <div class="header">
+          <h1>Quality Analysis: $hostName</h1>
+          <div style="display: flex; align-items: center;">
+            <div id="gauge_div" style="width: 150px;"></div>
+            <div style="margin-left: 30px;">
+              <span class="score-badge">$score</span> - <strong>$scoreLabel</strong><br/>
+              <em>Correlation between Tanium CPU activity and VMware Ready Time spikes.</em>
             </div>
-            <h2>Tanium Process Deep Dive (Peak vs Average)</h2>
-            <table>
-                <thead><tr><th>Process_PID</th><th>Average Load</th><th>Peak Burst</th></tr></thead>
-                <tbody>$($taniumTable -join "")</tbody>
-            </table>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="card" id="pie_div" style="height: 400px;"></div>
+          <div class="card" id="line_div" style="height: 400px;"></div>
+        </div>
+        <div class="card" style="margin-top: 20px;">
+          <h2>Tanium PID Performance Table</h2>
+          <table style="width: 100%; border-collapse: collapse;">
+            <thead><tr style="background: #eee;"><th>PID</th><th>Avg CPU</th><th>Peak Burst</th></tr></thead>
+            <tbody>$tanRows</tbody>
+          </table>
         </div>
       </body>
     </html>
 "@
-    $html | Out-File $reportFile
-}
