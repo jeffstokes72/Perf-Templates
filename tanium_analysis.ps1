@@ -109,11 +109,11 @@ function Invoke-RelogConversion ($InputPath, $OutputPath) {
     try {
         $counterList | Set-Content -Path $counterFile -Encoding ASCII
 
-        $relogOutput = & $script:ResolvedRelogExe $InputPath -cf $counterFile -f bin -o $OutputPath 2>&1
+        $relogOutput = & $script:ResolvedRelogExe $InputPath -cf $counterFile -f bin -o $OutputPath -y 2>&1
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
             Write-Log "  -> relog filtered conversion failed (exit $exitCode). Retrying without counter filter." "WARN"
-            $relogOutput = & $script:ResolvedRelogExe $InputPath -f bin -o $OutputPath 2>&1
+            $relogOutput = & $script:ResolvedRelogExe $InputPath -f bin -o $OutputPath -y 2>&1
             $exitCode = $LASTEXITCODE
         }
 
@@ -214,6 +214,15 @@ foreach ($file in $blgFiles) {
 
     if ($avgInterval -gt 15) { Write-Log "  -> Low Fidelity Warning: Sampling interval is $($avgInterval)s" "WARN" }
 
+    # Determine counter set preference (Process V2 over Process) to avoid double-counting
+    $useProcessV2 = $false
+    foreach ($s in $firstSampleSet.CounterSamples) {
+        if ($s.Path -like "*\Process V2(*)*") {
+            $useProcessV2 = $true
+            break
+        }
+    }
+
     # Initialize Containers
     $stolenList = New-Object System.Collections.Generic.List[double]
     $iopsList = New-Object System.Collections.Generic.List[double]
@@ -230,7 +239,7 @@ foreach ($file in $blgFiles) {
             if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = ConvertTo-SafeDouble $s.CookedValue }
             if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = ConvertTo-SafeDouble $s.CookedValue }
 
-            if ($s.Path -like "*\Process(*)*" -or $s.Path -like "*\Process V2(*)*") {
+            if (($useProcessV2 -and $s.Path -like "*\Process V2(*)*") -or (-not $useProcessV2 -and $s.Path -like "*\Process(*)*")) {
                 $pidName = ([regex]::Match($s.Path, "\((.*?)\)")).Groups[1].Value
                 if ([string]::IsNullOrWhiteSpace($pidName) -or $pidName -match "_Total|Idle") { continue }
                 if (!$procData[$pidName]) { $procData[$pidName] = @{ CPU = @(); Priv = @(); User = @(); Mem = @(); Prio = @() } }
