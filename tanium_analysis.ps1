@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
     Professional Tanium & VMware Performance Utility.
-    Version: 12.3
+    Version: 12.4
 
 .DESCRIPTION
     - Fixes: Handles filenames with special chars ( ) [ ] by using a safe processing buffer.
+    - Fixes: Normalizes BLG input with relog.exe (better Process V2 compatibility).
     - Fixes: Skips 0-byte (empty) files automatically.
     - Diagnostics: Contention Score, K/U Ratio, Memory Slope, Priority.
 #>
@@ -14,6 +15,7 @@ $BaseDir      = "C:\TaniumPerformanceAnalysis"
 $SourceDir    = "$BaseDir\Source"
 $ReportDir    = "$BaseDir\Reports"
 $TempDir      = "$BaseDir\Temp"
+$RelogExe     = "$env:SystemRoot\System32\relog.exe"
 $LogFile      = "$BaseDir\Analysis_Log.txt"
 $SummaryFile  = Join-Path $ReportDir "Fleet_Contention_Summary.csv"
 
@@ -24,7 +26,7 @@ foreach ($path in @($BaseDir, $SourceDir, $ReportDir, $TempDir)) {
 
 # Initialize Log
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.3) ==="
+Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.4) ==="
 
 $masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
 
@@ -78,8 +80,72 @@ function Get-TrendSlope ($yValues) {
     return if ($denominator -eq 0) { 0 } else { (($n * $sumXY) - ($sumX * $sumY)) / $denominator }
 }
 
+function Resolve-RelogExePath ($PreferredPath) {
+    if (-not [string]::IsNullOrWhiteSpace($PreferredPath) -and (Test-Path -LiteralPath $PreferredPath)) {
+        return $PreferredPath
+    }
+    $relogCmd = Get-Command "relog.exe" -ErrorAction SilentlyContinue
+    if ($relogCmd) { return $relogCmd.Source }
+    return $null
+}
+
+function Invoke-RelogConversion ($InputPath, $OutputPath) {
+    $counterFile = Join-Path $TempDir ("relog_counters_{0}.txt" -f [Guid]::NewGuid().ToString("N"))
+    $counterList = @(
+        "\VM Processor(_Total)\CPU stolen time",
+        "\PhysicalDisk(_Total)\Disk Transfers/sec",
+        "\Process(*)\% Processor Time",
+        "\Process(*)\% Privileged Time",
+        "\Process(*)\% User Time",
+        "\Process(*)\Private Bytes",
+        "\Process(*)\Priority Base",
+        "\Process V2(*)\% Processor Time",
+        "\Process V2(*)\% Privileged Time",
+        "\Process V2(*)\% User Time",
+        "\Process V2(*)\Private Bytes",
+        "\Process V2(*)\Priority Base"
+    )
+
+    try {
+        $counterList | Set-Content -Path $counterFile -Encoding ASCII
+
+        $relogOutput = & $script:ResolvedRelogExe $InputPath -cf $counterFile -f bin -o $OutputPath 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
+            Write-Log "  -> relog filtered conversion failed (exit $exitCode). Retrying without counter filter." "WARN"
+            $relogOutput = & $script:ResolvedRelogExe $InputPath -f bin -o $OutputPath 2>&1
+            $exitCode = $LASTEXITCODE
+        }
+
+        if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $OutputPath)) {
+            $relogMessage = (($relogOutput | Select-Object -First 5) -join " ").Trim()
+            Write-Log "  -> relog conversion failed (exit $exitCode). $relogMessage" "ERROR"
+            return $false
+        }
+
+        if ((Get-Item -LiteralPath $OutputPath).Length -eq 0) {
+            Write-Log "  -> relog conversion produced an empty output file." "ERROR"
+            return $false
+        }
+
+        return $true
+    } catch {
+        Write-Log "  -> relog conversion failed unexpectedly. $($_.Exception.Message)" "ERROR"
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $counterFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- STAGE 1: PROCESSING BLG FILES ---
 Write-Log "Scanning $SourceDir for BLG files..." "INFO"
+$script:ResolvedRelogExe = Resolve-RelogExePath $RelogExe
+if (-not $script:ResolvedRelogExe) {
+    Write-Log "relog.exe was not found. Install Windows Performance tools or ensure relog is in PATH." "ERROR"
+    exit 1
+}
+Write-Log "Using relog executable: $script:ResolvedRelogExe" "INFO"
+
 $blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg"
 
 if ($blgFiles.Count -eq 0) { Write-Log "No .blg files found!" "ERROR"; exit }
@@ -96,6 +162,7 @@ foreach ($file in $blgFiles) {
     # 2. Safe Buffer Copy (Sanitizes Filename)
     $safeName = "safe_buffer_$($file.BaseName.GetHashCode()).blg"
     $bufferPath = Join-Path $TempDir $safeName
+    $normalizedPath = Join-Path $TempDir ("normalized_{0}.blg" -f [Guid]::NewGuid().ToString("N"))
 
     try {
         Copy-Item -LiteralPath $file.FullName -Destination $bufferPath -Force -ErrorAction Stop
@@ -104,27 +171,46 @@ foreach ($file in $blgFiles) {
         continue
     }
 
-    # 3. Import Data from Safe Buffer
-    try {
-        $counterData = Import-Counter -Path $bufferPath -ErrorAction Stop
-        Write-Log "  -> Successfully imported data." "SUCCESS"
-    } catch {
-        Write-Log "  -> FAILED to read data structure. Reason: $($_.Exception.Message)" "ERROR"
-        Remove-Item $bufferPath -Force -ErrorAction SilentlyContinue
+    # 3. Normalize with relog.exe to handle modern counter sets (Process V2, etc.)
+    if (-not (Invoke-RelogConversion -InputPath $bufferPath -OutputPath $normalizedPath)) {
+        Remove-Item -LiteralPath $bufferPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $normalizedPath -Force -ErrorAction SilentlyContinue
         continue
     }
 
-    # Clean up buffer immediately
-    Remove-Item $bufferPath -Force -ErrorAction SilentlyContinue
+    # 4. Import Data from normalized BLG
+    try {
+        $counterData = Import-Counter -Path $normalizedPath -ErrorAction Stop
+        Write-Log "  -> Successfully imported relog-normalized data." "SUCCESS"
+    } catch {
+        Write-Log "  -> FAILED to read normalized data structure. Reason: $($_.Exception.Message)" "ERROR"
+        Remove-Item -LiteralPath $bufferPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $normalizedPath -Force -ErrorAction SilentlyContinue
+        continue
+    }
+
+    # Clean up intermediate files immediately
+    Remove-Item -LiteralPath $bufferPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $normalizedPath -Force -ErrorAction SilentlyContinue
+
+    $firstSampleSet = $counterData | Select-Object -First 1
+    if (-not $firstSampleSet -or -not $firstSampleSet.CounterSamples -or $firstSampleSet.CounterSamples.Count -eq 0) {
+        Write-Log "  -> SKIPPING: No counter samples available after relog conversion." "WARN"
+        continue
+    }
 
     # Determine Hostname
-    $samplePath = $counterData[0].CounterSamples[0].Path
+    $samplePath = ($firstSampleSet.CounterSamples | Select-Object -First 1).Path
     if ($samplePath -match "\\\\(.*?)\\") { $hostName = $Matches[1] } else { $hostName = "Unknown" }
 
     # Fidelity Check
     $timeStamps = $counterData.Timestamp
-    $intervals = for ($i = 1; $i -lt $timeStamps.Count; $i++) { ($timeStamps[$i] - $timeStamps[$i - 1]).TotalSeconds }
-    $avgInterval = [Math]::Round(($intervals | Measure-Object -Average).Average, 1)
+    if ($timeStamps.Count -lt 2) {
+        $avgInterval = 0
+    } else {
+        $intervals = for ($i = 1; $i -lt $timeStamps.Count; $i++) { ($timeStamps[$i] - $timeStamps[$i - 1]).TotalSeconds }
+        $avgInterval = [Math]::Round(($intervals | Measure-Object -Average).Average, 1)
+    }
 
     if ($avgInterval -gt 15) { Write-Log "  -> Low Fidelity Warning: Sampling interval is $($avgInterval)s" "WARN" }
 
@@ -141,22 +227,23 @@ foreach ($file in $blgFiles) {
         $intervalTanSum = 0
 
         foreach ($s in $sampleSet.CounterSamples) {
-            if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = $s.CookedValue }
-            if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = $s.CookedValue }
+            if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = ConvertTo-SafeDouble $s.CookedValue }
+            if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = ConvertTo-SafeDouble $s.CookedValue }
 
-            if ($s.Path -like "*\Process(*)*") {
+            if ($s.Path -like "*\Process(*)*" -or $s.Path -like "*\Process V2(*)*") {
                 $pidName = ([regex]::Match($s.Path, "\((.*?)\)")).Groups[1].Value
-                if ($pidName -match "_Total|Idle") { continue }
+                if ([string]::IsNullOrWhiteSpace($pidName) -or $pidName -match "_Total|Idle") { continue }
                 if (!$procData[$pidName]) { $procData[$pidName] = @{ CPU = @(); Priv = @(); User = @(); Mem = @(); Prio = @() } }
 
                 if ($s.Path -like "*% Processor Time") {
-                    $procData[$pidName].CPU += $s.CookedValue
-                    if ($pidName -match "Tanium") { $intervalTanSum += $s.CookedValue }
+                    $cpuVal = ConvertTo-SafeDouble $s.CookedValue
+                    $procData[$pidName].CPU += $cpuVal
+                    if ($pidName -match "Tanium") { $intervalTanSum += $cpuVal }
                 }
-                if ($s.Path -like "*% Privileged Time") { $procData[$pidName].Priv += $s.CookedValue }
-                if ($s.Path -like "*% User Time") { $procData[$pidName].User += $s.CookedValue }
-                if ($s.Path -like "*Private Bytes") { $procData[$pidName].Mem += $s.CookedValue }
-                if ($s.Path -like "*Priority Base") { $procData[$pidName].Prio += $s.CookedValue }
+                if ($s.Path -like "*% Privileged Time") { $procData[$pidName].Priv += (ConvertTo-SafeDouble $s.CookedValue) }
+                if ($s.Path -like "*% User Time") { $procData[$pidName].User += (ConvertTo-SafeDouble $s.CookedValue) }
+                if ($s.Path -like "*Private Bytes") { $procData[$pidName].Mem += (ConvertTo-SafeDouble $s.CookedValue) }
+                if ($s.Path -like "*Priority Base") { $procData[$pidName].Prio += (ConvertTo-SafeDouble $s.CookedValue) }
             }
         }
         $stolenList.Add($intervalStolen)

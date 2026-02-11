@@ -1,14 +1,15 @@
-# Tanium & VMware Performance Quality Analyzer (v12.3)
+# Tanium & VMware Performance Quality Analyzer (v12.4)
 
 ## Overview
 This utility is a non-admin, portable diagnostic tool designed for analyzing performance telemetry from VMware Guest OS environments. It focuses on the impact of **Tanium Client** and **TaniumCX** child processes on hypervisor scheduling.
 
-## Version 12.3 updates
+## Version 12.4 updates
 - **Dedicated Directory**: Operations are centralized in `C:\TaniumPerformanceAnalysis`.
-- **Non-Admin Support**: Replaced `relog.exe` with native `Import-Counter`.
+- **Compatibility Upgrade**: BLG files are normalized with `relog.exe` before analysis.
 - **Portability**: Designed to run on analyst workstations separate from the data collection source.
 - **Special Character Filename Support**: BLG files are copied to a safe temp buffer before import.
 - **Empty Capture Guardrail**: 0-byte BLG files are skipped automatically with a clear log message.
+- **Process V2 Support**: Parser accepts both `Process(*)` and `Process V2(*)` counters.
 
 ## Core Diagnostic Logic
 
