@@ -14,9 +14,9 @@
 #>
 
 # --- CONFIGURATION ---
-$blgFolder    = "C:\PerfLogs\Source"
-$csvFolder    = "C:\PerfLogs\Analysis"
-$reportFolder = "C:\PerfLogs\Reports"
+$blgFolder    = "C:\PerfLogs\Source"    # Input folder for BLG files
+$csvFolder    = "C:\PerfLogs\Analysis"  # Work folder for CSVs
+$reportFolder = "C:\PerfLogs\Reports"   # Output folder for HTML/CSV Summary
 $summaryFile  = Join-Path $reportFolder "Fleet_Contention_Summary.csv"
 
 # Initialization
@@ -213,5 +213,6 @@ foreach ($group in $hostedFiles) {
     })
 }
 
+# --- FINALIZE ---
 $masterSummary | Export-Csv $summaryFile -NoTypeInformation
 Write-Host "`nUtility Complete! Reports generated in: $reportFolder" -ForegroundColor Green
