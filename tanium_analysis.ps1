@@ -1,36 +1,29 @@
 <#
 .SYNOPSIS
     Professional Tanium & VMware Performance Utility.
-    Version: 11.1
+    Version: 12.1
     
 .DESCRIPTION
-    - Full Lifecycle: Relog Conversion -> Host Grouping -> Analytics -> HTML Reporting.
-    - Robust Error Handling: Validates counter existence and handles null/missing data safely.
-    - Fidelity Check: Validates sampling interval to ensure burst activity is captured.
-    - Diagnostics: 
-        1. Contention Score: Correlation of Tanium bursts to VMware Ready Time.
-        2. K/U Ratio: Detects AV/EDR hooking/interference (Privileged/User ratio).
-        3. Memory Slope: Linear regression to detect leaks over time.
-        4. Priority: Detects priority deviations from 'Normal' (8).
+    - Full Lifecycle: Native BLG Parsing -> Host Grouping -> Analytics -> HTML Reporting.
+    - Non-Admin: Uses native Get-Counter. No relog.exe required.
+    - Diagnostics: Contention Score, K/U Ratio, Memory Slope, Priority.
+    - Features: Actionable Insights & Reference Library restored.
 #>
 
 # --- CONFIGURATION ---
-$blgFolder    = "C:\PerfLogs\Source"
-$csvFolder    = "C:\PerfLogs\Analysis"
-$reportFolder = "C:\PerfLogs\Reports"
-$summaryFile  = Join-Path $reportFolder "Fleet_Contention_Summary.csv"
+$BaseDir      = "C:\TaniumPerformanceAnalysis"
+$SourceDir    = "$BaseDir\Source"
+$ReportDir    = "$BaseDir\Reports"
+$SummaryFile  = Join-Path $ReportDir "Fleet_Contention_Summary.csv"
 
-# Initialization
-foreach ($path in @($csvFolder, $reportFolder)) {
-    if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path }
-}
+# Ensure Directory Structure
+if (!(Test-Path $BaseDir))   { New-Item -ItemType Directory -Path $BaseDir | Out-Null }
+if (!(Test-Path $SourceDir)) { New-Item -ItemType Directory -Path $SourceDir | Out-Null }
+if (!(Test-Path $ReportDir)) { New-Item -ItemType Directory -Path $ReportDir | Out-Null }
 
-# --- ROBUST HELPERS ---
+$masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
 
-function ConvertTo-SafeDouble ($Value) {
-    if ([string]::IsNullOrWhiteSpace($Value)) { return 0.0 }
-    try { return [double]$Value } catch { return 0.0 }
-}
+# --- MATH HELPERS ---
 
 function Get-ContentionScore ($listA, $listB) {
     if ($listA.Count -lt 2 -or $listB.Count -lt 2) { return 0.0 }
@@ -63,97 +56,101 @@ function Get-TrendSlope ($yValues) {
     return if ($denominator -eq 0) { 0 } else { (($n * $sumXY) - ($sumX * $sumY)) / $denominator }
 }
 
-# --- STAGE 1: CONVERSION ---
-Write-Host "--- STAGE 1: Converting BLGs to CSV ---" -ForegroundColor Cyan
-$blgFiles = Get-ChildItem -Path $blgFolder -Filter "*.blg"
+# --- STAGE 1: PROCESSING BLG FILES ---
+Write-Host "--- STAGE 1: Processing BLG Files (Non-Admin Mode) ---" -ForegroundColor Cyan
+$blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg"
 
 foreach ($file in $blgFiles) {
-    $outputCsv = Join-Path $csvFolder ($file.BaseName + ".csv")
-    if (!(Test-Path $outputCsv)) {
-        Write-Host "Relogging $($file.Name)..." -ForegroundColor Gray
-        relog $file.FullName -f csv -o $outputCsv `
-            -q "\Process(*)\% Processor Time" `
-            -q "\Process(*)\% Privileged Time" `
-            -q "\Process(*)\% User Time" `
-            -q "\Process(*)\Private Bytes" `
-            -q "\Process(*)\Priority Base" `
-            -q "\PhysicalDisk(_Total)\Disk Transfers/sec" `
-            -q "\VM Processor(_Total)\*" 2>$null
+    Write-Host "Reading $($file.Name)..." -ForegroundColor Gray
+    
+    # Import Data Natively
+    try {
+        $counterData = Import-Counter -Path $file.FullName -ErrorAction Stop
+    } catch {
+        Write-Warning "Could not read $($file.Name). Ensure file is valid and unlocked."
+        continue
     }
-}
 
-# --- STAGE 2: ANALYSIS & GROUPING ---
-Write-Host "`n--- STAGE 2: Processing Data by Host ---" -ForegroundColor Cyan
-$csvFiles = Get-ChildItem -Path $csvFolder -Filter "*.csv"
-$masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
-
-$hostedFiles = $csvFiles | Group-Object {
-    $firstLine = Get-Content $_.FullName -TotalCount 2 | Select-Object -Last 1
-    if ($firstLine -match "\\\\(.*?)\\") { $Matches[1] } else { "UnknownHost" }
-}
-
-foreach ($group in $hostedFiles) {
-    $hostName = $group.Name
-    Write-Host "Analyzing Host: $hostName" -ForegroundColor White
-    $allData = foreach ($f in $group.Group) { Import-Csv $f.FullName }
-    $headers = $allData[0].psobject.Properties.Name
+    # Determine Hostname
+    $samplePath = $counterData[0].CounterSamples[0].Path
+    if ($samplePath -match "\\\\(.*?)\\") { $hostName = $Matches[1] } else { $hostName = "Unknown" }
 
     # Fidelity Check
-    $timeStamps = $allData | ForEach-Object { [DateTime]$_."(PDH-CSV 4.0)" }
+    $timeStamps = $counterData.Timestamp
     $intervals = for($i=1; $i -lt $timeStamps.Count; $i++) { ($timeStamps[$i] - $timeStamps[$i-1]).TotalSeconds }
     $avgInterval = [Math]::Round(($intervals | Measure-Object -Average).Average, 1)
 
-    # 1. System Metrics
-    $stolenKey = "\\$hostName\VM Processor(_Total)\CPU stolen time"
-    $iopsKey   = "\\$hostName\PhysicalDisk(_Total)\Disk Transfers/sec"
-    $stolenList = $allData | ForEach-Object { ConvertTo-SafeDouble $_."$stolenKey" }
-    $iopsList   = $allData | ForEach-Object { ConvertTo-SafeDouble $_."$iopsKey" }
-    
-    # 2. Process Deep Dive
-    $procCols = $headers | Where-Object { $_ -like "*Process(*)*% Processor Time*" }
-    $processSummary = foreach ($col in $procCols) {
-        $pidName = ([regex]::Match($col, "\((.*?)\)")).Groups[1].Value
-        if ($pidName -match "_Total|Idle") { continue }
-        
-        $privCol = "\\$hostName\Process($pidName)\% Privileged Time"
-        $userCol = "\\$hostName\Process($pidName)\% User Time"
-        $memCol  = "\\$hostName\Process($pidName)\Private Bytes"
-        $prioCol = "\\$hostName\Process($pidName)\Priority Base"
-        
-        $avgPriv = ($allData | ForEach-Object { ConvertTo-SafeDouble $_."$privCol" } | Measure-Object -Average).Average
-        $avgUser = ($allData | ForEach-Object { ConvertTo-SafeDouble $_."$userCol" } | Measure-Object -Average).Average
-        $memVals = $allData | ForEach-Object { ConvertTo-SafeDouble $_."$memCol" }
-        
-        [PSCustomObject]@{ 
-            PID       = $pidName
-            AvgCPU    = [Math]::Round(($allData | ForEach-Object { ConvertTo-SafeDouble $_."$col" } | Measure-Object -Average).Average, 2)
+    # Initialize Containers
+    $stolenList = New-Object System.Collections.Generic.List[double]
+    $iopsList   = New-Object System.Collections.Generic.List[double]
+    $tanAggList = New-Object System.Collections.Generic.List[double]
+    $procData   = @{}
+
+    # Iterate Samples
+    foreach ($sampleSet in $counterData) {
+        $intervalStolen = 0
+        $intervalIops   = 0
+        $intervalTanSum = 0
+
+        foreach ($s in $sampleSet.CounterSamples) {
+            # System Metrics
+            if ($s.Path -like "*VM Processor(_Total)\CPU stolen time") { $intervalStolen = $s.CookedValue }
+            if ($s.Path -like "*PhysicalDisk(_Total)\Disk Transfers/sec") { $intervalIops = $s.CookedValue }
+
+            # Process Metrics
+            if ($s.Path -like "*\Process(*)*") {
+                $pidName = ([regex]::Match($s.Path, "\((.*?)\)")).Groups[1].Value
+                if ($pidName -match "_Total|Idle") { continue }
+                
+                if (!$procData[$pidName]) { $procData[$pidName] = @{ CPU=@(); Priv=@(); User=@(); Mem=@(); Prio=@() } }
+
+                if ($s.Path -like "*% Processor Time") { 
+                    $procData[$pidName].CPU += $s.CookedValue 
+                    if ($pidName -match "Tanium") { $intervalTanSum += $s.CookedValue }
+                }
+                if ($s.Path -like "*% Privileged Time") { $procData[$pidName].Priv += $s.CookedValue }
+                if ($s.Path -like "*% User Time") { $procData[$pidName].User += $s.CookedValue }
+                if ($s.Path -like "*Private Bytes") { $procData[$pidName].Mem += $s.CookedValue }
+                if ($s.Path -like "*Priority Base") { $procData[$pidName].Prio += $s.CookedValue }
+            }
+        }
+        $stolenList.Add($intervalStolen)
+        $iopsList.Add($intervalIops)
+        $tanAggList.Add($intervalTanSum)
+    }
+
+    # --- STAGE 2: ANALYSIS ---
+    $processSummary = foreach ($pid in $procData.Keys) {
+        $avgUser = ($procData[$pid].User | Measure-Object -Average).Average
+        $avgPriv = ($procData[$pid].Priv | Measure-Object -Average).Average
+        [PSCustomObject]@{
+            PID       = $pid
+            AvgCPU    = [Math]::Round(($procData[$pid].CPU | Measure-Object -Average).Average, 2)
             KURatio   = if ($avgUser -gt 0) { [Math]::Round(($avgPriv / $avgUser), 3) } else { 0 }
-            MemSlope  = [Math]::Round((Get-TrendSlope $memVals) / 1MB, 4)
-            BasePrio  = [Math]::Round(($allData | ForEach-Object { ConvertTo-SafeDouble $_."$prioCol" } | Measure-Object -Average).Average, 0)
-            PeakMemMB = [Math]::Round(($memVals | Measure-Object -Maximum).Maximum / 1MB, 2)
-            IsTan     = $pidName -match "Tanium"
+            MemSlope  = [Math]::Round((Get-TrendSlope $procData[$pid].Mem) / 1MB, 4)
+            BasePrio  = [Math]::Round(($procData[$pid].Prio | Measure-Object -Average).Average, 0)
+            PeakMemMB = [Math]::Round(($procData[$pid].Mem | Measure-Object -Maximum).Maximum / 1MB, 2)
+            IsTan     = $pid -match "Tanium"
         }
     }
 
-    # 3. Contention Scoring
-    $tanCols = $headers | Where-Object { $_ -match "Tanium" -and $_ -like "*% Processor Time*" }
-    $tanAgg = foreach ($row in $allData) { 
-        $sum = 0; foreach ($c in $tanCols) { $sum += ConvertTo-SafeDouble $row."$c" }; $sum 
-    }
-    $score = Get-ContentionScore $stolenList $tanAgg
+    $score = Get-ContentionScore $stolenList $tanAggList
 
-    # --- INSIGHTS ---
+    # --- ACTIONABLE INSIGHTS LOGIC ---
     $insights = New-Object System.Collections.Generic.List[string]
     if ($avgInterval -gt 15) { $insights.Add("<strong style='color:#d9534f;'>Low Fidelity Warning:</strong> Sampling interval is $($avgInterval)s. Burst activity may be aliased.") }
-    if (!($headers -contains $stolenKey)) { $insights.Add("<strong>Data Gap:</strong> VMware counters missing. Check VMware Tools.") }
-    elseif ($score -gt 0.7) { $insights.Add("<strong>Scheduling Contention:</strong> High correlation with VM Ready Time.") }
-    if (($processSummary | Where-Object { $_.IsTan -and $_.KURatio -gt 0.3 })) { $insights.Add("<strong>AV Interference:</strong> High K/U ratio detected; check exclusions.") }
+    if ($stolenList.Count -eq 0 -or ($stolenList | Measure-Object -Sum).Sum -eq 0) { $insights.Add("<strong>Data Gap:</strong> VMware counters missing or zero. Validate VMware Tools.") }
+    elseif ($score -gt 0.7) { $insights.Add("<strong>Scheduling Contention:</strong> High correlation detected between workload bursts and hypervisor ready time.") }
+    if (($processSummary | Where-Object { $_.IsTan -and $_.KURatio -gt 0.3 })) { $insights.Add("<strong>Filter Driver Overhead:</strong> Elevated kernel-to-user ratios observed. Validate security exclusions.") }
+    if (($processSummary | Where-Object { $_.IsTan -and $_.MemSlope -gt 0.5 })) { $insights.Add("<strong>Memory Trend:</strong> Steady incline in private bytes observed (Potential Leak).") }
+    if ($insights.Count -eq 0) { $insights.Add("System metrics appear healthy.") }
 
     # --- STAGE 3: HTML REPORT ---
     $scoreColor = if ($score -gt 0.7) { "#d9534f" } elseif ($score -gt 0.4) { "#f0ad4e" } else { "#5cb85c" }
     $tanRows = ($processSummary | Where-Object IsTan | Sort-Object AvgCPU -Descending | ForEach-Object { 
         $lStyle = if ($_.MemSlope -gt 0.5) { "background:#ffcccc;" } else { "" }
-        "<tr style='$lStyle'><td>$($_.PID)</td><td>$($_.AvgCPU)%</td><td>$($_.KURatio)</td><td>$($_.BasePrio)</td><td>$($_.MemSlope) MB/inc</td><td>$($_.PeakMemMB) MB</td></tr>" 
+        $kStyle = if ($_.KURatio -gt 0.3)  { "color:red; font-weight:bold;" } else { "" }
+        "<tr style='$lStyle'><td>$($_.PID)</td><td>$($_.AvgCPU)%</td><td style='$kStyle'>$($_.KURatio)</td><td>$($_.BasePrio)</td><td>$($_.MemSlope) MB/inc</td><td>$($_.PeakMemMB) MB</td></tr>" 
     }) -join ""
     
     $pieRows  = ($processSummary | Sort-Object AvgCPU -Descending | Select-Object -First 12 | ForEach-Object { "['$($_.PID)', $($_.AvgCPU)]" }) -join ","
@@ -178,6 +175,8 @@ foreach ($group in $hostedFiles) {
             table{width:100%;border-collapse:collapse;margin-top:15px;}
             th, td{padding:12px;border-bottom:1px solid #ddd;text-align:left;}
             th{background:#eee}
+            .ref-box { background: #e9ecef; padding: 15px; border-radius: 5px; font-size: 0.85em; margin-top: 20px; }
+            .ref-box a { color: #0056b3; text-decoration: none; font-weight: bold; }
         </style>
     </head>
     <body>
@@ -185,17 +184,29 @@ foreach ($group in $hostedFiles) {
             <h1>Quality Report: $hostName</h1>
             <div style="display:flex;align-items:center;">
                 <div id="g" style="width:200px;height:150px"></div>
-                <div style="margin-left:20px"><span style="font-size:2.5em;font-weight:bold;color:$scoreColor">$score</span><br/>Contention Score</div>
+                <div style="margin-left:20px"><span style="font-size:2.5em;font-weight:bold;color:$scoreColor">$score</span><br/>Contention Score (Sampling: $($avgInterval)s)</div>
             </div>
-            <div class="insight-box"><strong>Insights & Fidelity:</strong><ul><li>$($insights -join "</li><li>")</li></ul></div>
+            
+            <div class="insight-box">
+                <strong>Observations & Opportunities:</strong>
+                <ul><li>$($insights -join "</li><li>")</li></ul>
+            </div>
+
             <div style="display:flex;"><div id="p" style="width:40%;height:400px"></div><div id="l" style="width:60%;height:400px"></div></div>
             <table><thead><tr><th>PID</th><th>Avg CPU</th><th>K/U Ratio</th><th>Base Prio</th><th>Mem Slope</th><th>Peak MB</th></tr></thead><tbody>$tanRows</tbody></table>
+            
+            <div class="ref-box">
+                <strong>Technical Reference Library:</strong><br/><br/>
+                • <strong>K/U Ratio:</strong> <a href="https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-high-cpu-usage-privileged-time" target="_blank">Troubleshoot High Privileged Time</a><br/>
+                • <strong>Process Memory:</strong> <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/the-!address-extension" target="_blank">Understanding Process Memory Counters</a><br/>
+                • <strong>VMware Ready Time:</strong> <a href="https://kb.vmware.com/s/article/2002181" target="_blank">Troubleshooting ESXi CPU Contention</a>
+            </div>
         </div>
     </body></html>
 "@
-    $htmlBody | Out-File (Join-Path $reportFolder "$hostName`_Quality_Report.html")
+    $htmlBody | Out-File (Join-Path $ReportDir "$hostName`_Analysis.html")
     $masterSummary.Add([PSCustomObject]@{ HostName=$hostName; Contention=$score; Fidelity="$($avgInterval)s"; Status=if($score -gt 0.7){"Critical"}else{"Healthy"} })
 }
 
-$masterSummary | Export-Csv $summaryFile -NoTypeInformation
-Write-Host "Complete. Reports in: $reportFolder" -ForegroundColor Green
+$masterSummary | Export-Csv $SummaryFile -NoTypeInformation
+Write-Host "Analysis Complete. Reports located in: $ReportDir" -ForegroundColor Green
