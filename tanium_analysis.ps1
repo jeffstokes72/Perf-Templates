@@ -68,7 +68,7 @@ function Get-TrendSlope ($yValues) {
     if ($n -lt 10) { return 0 }
     $sumX = 0; $sumY = 0; $sumXY = 0; $sumX2 = 0
     for ($x = 0; $x -lt $n; $x++) {
-        $y = [double]$yValues[$x]
+        $y = ConvertTo-SafeDouble $yValues[$x]
         $sumX += $x
         $sumY += $y
         $sumXY += ($x * $y)
