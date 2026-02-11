@@ -1,9 +1,9 @@
-# Tanium & VMware Performance Quality Analyzer (v12.5)
+# Tanium & VMware Performance Quality Analyzer (v12.6)
 
 ## Overview
 This utility is a non-admin, portable diagnostic tool designed for analyzing performance telemetry from VMware Guest OS environments. It focuses on the impact of **Tanium Client** and **TaniumCX** child processes on hypervisor scheduling.
 
-## Version 12.5 updates
+## Version 12.6 updates
 - **Dedicated Directory**: Operations are centralized in `C:\TaniumPerformanceAnalysis`.
 - **Compatibility Upgrade**: BLG files are normalized with `relog.exe` before analysis.
 - **Portability**: Designed to run on analyst workstations separate from the data collection source.
@@ -11,6 +11,8 @@ This utility is a non-admin, portable diagnostic tool designed for analyzing per
 - **Empty Capture Guardrail**: 0-byte BLG files are skipped automatically with a clear log message.
 - **Process V2 Support**: Parser accepts both `Process(*)` and `Process V2(*)` counters.
 - **Duplicate Counter Protection**: Interval metrics are de-duplicated when both Process and Process V2 samples overlap.
+- **Recursive Source Discovery**: BLG files are discovered recursively under `C:\TaniumPerformanceAnalysis\Source`.
+- **Duplicate Filename Safe Output**: Report naming includes source path tokens so duplicate BLG filenames do not collide.
 
 ## Core Diagnostic Logic
 
@@ -34,7 +36,7 @@ A primary indicator of filter driver interference (AV, EDR, DLP).
 
 
 ## Usage
-1. **Stage**: Place `.blg` files in `C:\TaniumPerformanceAnalysis\Source`.
+1. **Stage**: Place `.blg` files anywhere under `C:\TaniumPerformanceAnalysis\Source` (subfolders supported).
 2. **Run**: Execute the utility via standard PowerShell.
 3. **Review**:
     - Sort `Fleet_Contention_Summary.csv` by **ContentionScore**.
