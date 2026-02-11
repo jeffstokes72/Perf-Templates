@@ -186,6 +186,42 @@ function Invoke-RelogConversion ($InputPath, $OutputPath) {
     }
 }
 
+function Complete-WorkerJob ($completedJob, $pendingJobs, $masterSummary) {
+    $jobOutput = @()
+    try {
+        $jobOutput = @(Receive-Job -Job $completedJob -ErrorAction SilentlyContinue -ErrorVariable jobErrors)
+    } catch {
+        Write-Log "Worker job '$($completedJob.Name)' failed while receiving results. $($_.Exception.Message)" "ERROR"
+    }
+
+    if ($jobErrors -and $jobErrors.Count -gt 0) {
+        Write-Log "Worker job '$($completedJob.Name)' encountered errors during execution. $(($jobErrors | Select-Object -First 1).Exception.Message)" "ERROR"
+    }
+
+    foreach ($entry in $jobOutput) {
+        if ($null -ne $entry -and $entry.PSObject.Properties["HostName"]) {
+            $masterSummary.Add([PSCustomObject]$entry)
+        }
+    }
+
+    if ($completedJob.State -eq "Failed") {
+        $reason = $null
+        if ($completedJob.ChildJobs -and $completedJob.ChildJobs[0].JobStateInfo.Reason) {
+            $reason = $completedJob.ChildJobs[0].JobStateInfo.Reason.Message
+        }
+        if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Unknown worker failure." }
+        Write-Log "Worker job '$($completedJob.Name)' failed. $reason" "ERROR"
+    }
+
+    Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
+    for ($i = $pendingJobs.Count - 1; $i -ge 0; $i--) {
+        if ($pendingJobs[$i].Id -eq $completedJob.Id) {
+            $pendingJobs.RemoveAt($i)
+            break
+        }
+    }
+}
+
 # --- STAGE 1: PROCESSING BLG FILES ---
 if ($WorkerMode -and -not [string]::IsNullOrWhiteSpace($WorkerResolvedRelogExe) -and (Test-Path -LiteralPath $WorkerResolvedRelogExe)) {
     $script:ResolvedRelogExe = $WorkerResolvedRelogExe
@@ -228,35 +264,7 @@ if ($WorkerMode) {
                 $completedJob = Wait-Job -Job $pendingJobs.ToArray() -Any -Timeout 5
                 if (-not $completedJob) { continue }
 
-                $jobOutput = @()
-                try {
-                    $jobOutput = @(Receive-Job -Job $completedJob -ErrorAction Stop)
-                } catch {
-                    Write-Log "Worker job '$($completedJob.Name)' failed while receiving results. $($_.Exception.Message)" "ERROR"
-                }
-
-                foreach ($entry in $jobOutput) {
-                    if ($null -ne $entry -and $entry.PSObject.Properties["HostName"]) {
-                        $masterSummary.Add([PSCustomObject]$entry)
-                    }
-                }
-
-                if ($completedJob.State -eq "Failed") {
-                    $reason = $null
-                    if ($completedJob.ChildJobs -and $completedJob.ChildJobs[0].JobStateInfo.Reason) {
-                        $reason = $completedJob.ChildJobs[0].JobStateInfo.Reason.Message
-                    }
-                    if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Unknown worker failure." }
-                    Write-Log "Worker job '$($completedJob.Name)' failed. $reason" "ERROR"
-                }
-
-                Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
-                for ($i = $pendingJobs.Count - 1; $i -ge 0; $i--) {
-                    if ($pendingJobs[$i].Id -eq $completedJob.Id) {
-                        $pendingJobs.RemoveAt($i)
-                        break
-                    }
-                }
+                Complete-WorkerJob $completedJob $pendingJobs $masterSummary
             }
 
             $jobName = "BLG_{0}_{1}" -f (ConvertTo-SafeFileToken (Get-RelativeSourcePath $file.FullName)), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -271,35 +279,7 @@ if ($WorkerMode) {
             $completedJob = Wait-Job -Job $pendingJobs.ToArray() -Any
             if (-not $completedJob) { continue }
 
-            $jobOutput = @()
-            try {
-                $jobOutput = @(Receive-Job -Job $completedJob -ErrorAction Stop)
-            } catch {
-                Write-Log "Worker job '$($completedJob.Name)' failed while receiving results. $($_.Exception.Message)" "ERROR"
-            }
-
-            foreach ($entry in $jobOutput) {
-                if ($null -ne $entry -and $entry.PSObject.Properties["HostName"]) {
-                    $masterSummary.Add([PSCustomObject]$entry)
-                }
-            }
-
-            if ($completedJob.State -eq "Failed") {
-                $reason = $null
-                if ($completedJob.ChildJobs -and $completedJob.ChildJobs[0].JobStateInfo.Reason) {
-                    $reason = $completedJob.ChildJobs[0].JobStateInfo.Reason.Message
-                }
-                if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Unknown worker failure." }
-                Write-Log "Worker job '$($completedJob.Name)' failed. $reason" "ERROR"
-            }
-
-            Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
-            for ($i = $pendingJobs.Count - 1; $i -ge 0; $i--) {
-                if ($pendingJobs[$i].Id -eq $completedJob.Id) {
-                    $pendingJobs.RemoveAt($i)
-                    break
-                }
-            }
+            Complete-WorkerJob $completedJob $pendingJobs $masterSummary
         }
 
         $masterSummary | Export-Csv $SummaryFile -NoTypeInformation
