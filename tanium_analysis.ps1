@@ -1,16 +1,24 @@
 <#
 .SYNOPSIS
     Professional Tanium & VMware Performance Utility.
-    Version: 12.6
+    Version: 12.7
 
 .DESCRIPTION
     - Fixes: Handles filenames with special chars ( ) [ ] by using a safe processing buffer.
     - Fixes: Normalizes BLG input with relog.exe (better Process V2 compatibility).
     - Fixes: Recursively discovers BLG files under Source and supports duplicate names.
+    - Performance: Uses up to 8 CPUs by default for parallel BLG processing.
     - Fixes: De-duplicates overlapping Process and Process V2 interval metrics.
     - Fixes: Skips 0-byte (empty) files automatically.
     - Diagnostics: Contention Score, K/U Ratio, Memory Slope, Priority.
 #>
+
+param(
+    [switch]$WorkerMode,
+    [string]$WorkerFilePath,
+    [string]$WorkerResolvedRelogExe,
+    [int]$MaxProcessingCpus = 8
+)
 
 # --- CONFIGURATION ---
 $BaseDir      = "C:\TaniumPerformanceAnalysis"
@@ -28,7 +36,9 @@ foreach ($path in @($BaseDir, $SourceDir, $ReportDir, $TempDir)) {
 
 # Initialize Log
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.6) ==="
+if (-not $WorkerMode) {
+    Add-Content -Path $LogFile -Value "`n[$timestamp] === Starting Analysis Run (v12.7) ==="
+}
 
 $masterSummary = New-Object System.Collections.Generic.List[PSCustomObject]
 
@@ -64,6 +74,14 @@ function ConvertTo-SafeFileToken ($Value) {
     $safe = $safe.Trim("_")
     if ([string]::IsNullOrWhiteSpace($safe)) { return "Unknown" }
     return $safe
+}
+
+function Get-RelativeSourcePath ($FullPath) {
+    if ([string]::IsNullOrWhiteSpace($FullPath)) { return "Unknown" }
+    if ($FullPath.StartsWith($SourceDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return ($FullPath.Substring($SourceDir.Length) -replace "^[\\/]+", "")
+    }
+    return $FullPath
 }
 
 function Get-ProcessCounterSourceRank ($CounterPath) {
@@ -169,25 +187,129 @@ function Invoke-RelogConversion ($InputPath, $OutputPath) {
 }
 
 # --- STAGE 1: PROCESSING BLG FILES ---
-Write-Log "Scanning $SourceDir for BLG files..." "INFO"
-$script:ResolvedRelogExe = Resolve-RelogExePath $RelogExe
+if ($WorkerMode -and -not [string]::IsNullOrWhiteSpace($WorkerResolvedRelogExe) -and (Test-Path -LiteralPath $WorkerResolvedRelogExe)) {
+    $script:ResolvedRelogExe = $WorkerResolvedRelogExe
+} else {
+    $script:ResolvedRelogExe = Resolve-RelogExePath $RelogExe
+}
 if (-not $script:ResolvedRelogExe) {
     Write-Log "relog.exe was not found. Install Windows Performance tools or ensure relog is in PATH." "ERROR"
     exit 1
 }
-Write-Log "Using relog executable: $script:ResolvedRelogExe" "INFO"
 
-$blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg" -File -Recurse | Sort-Object FullName
+$blgFiles = @()
+if ($WorkerMode) {
+    if ([string]::IsNullOrWhiteSpace($WorkerFilePath) -or -not (Test-Path -LiteralPath $WorkerFilePath)) {
+        Write-Log "Worker file path was not provided or does not exist: $WorkerFilePath" "ERROR"
+        exit 1
+    }
+    $blgFiles = @(Get-Item -LiteralPath $WorkerFilePath -ErrorAction Stop)
+} else {
+    Write-Log "Scanning $SourceDir for BLG files..." "INFO"
+    Write-Log "Using relog executable: $script:ResolvedRelogExe" "INFO"
 
-if ($blgFiles.Count -eq 0) { Write-Log "No .blg files found!" "ERROR"; exit }
-$blgDirs = $blgFiles | Select-Object -ExpandProperty DirectoryName -Unique
-Write-Log "Discovered $($blgFiles.Count) BLG file(s) across $($blgDirs.Count) source folder(s)." "INFO"
+    $blgFiles = Get-ChildItem -Path $SourceDir -Filter "*.blg" -File -Recurse | Sort-Object FullName
+    if ($blgFiles.Count -eq 0) { Write-Log "No .blg files found!" "ERROR"; exit }
+
+    $blgDirs = $blgFiles | Select-Object -ExpandProperty DirectoryName -Unique
+    Write-Log "Discovered $($blgFiles.Count) BLG file(s) across $($blgDirs.Count) source folder(s)." "INFO"
+
+    $availableCpuCount = [Math]::Max(1, [Environment]::ProcessorCount)
+    $workerCount = [Math]::Max(1, [Math]::Min($MaxProcessingCpus, $availableCpuCount))
+    Write-Log "Data processing concurrency: up to $workerCount CPU worker(s)." "INFO"
+
+    if ($workerCount -gt 1 -and $blgFiles.Count -gt 1) {
+        $pendingJobs = New-Object System.Collections.Generic.List[System.Management.Automation.Job]
+        $scriptPath = $PSCommandPath
+        if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
+
+        foreach ($file in $blgFiles) {
+            while ($pendingJobs.Count -ge $workerCount) {
+                $completedJob = Wait-Job -Job $pendingJobs.ToArray() -Any -Timeout 5
+                if (-not $completedJob) { continue }
+
+                $jobOutput = @()
+                try {
+                    $jobOutput = @(Receive-Job -Job $completedJob -ErrorAction Stop)
+                } catch {
+                    Write-Log "Worker job '$($completedJob.Name)' failed while receiving results. $($_.Exception.Message)" "ERROR"
+                }
+
+                foreach ($entry in $jobOutput) {
+                    if ($null -ne $entry -and $entry.PSObject.Properties["HostName"]) {
+                        $masterSummary.Add([PSCustomObject]$entry)
+                    }
+                }
+
+                if ($completedJob.State -eq "Failed") {
+                    $reason = $null
+                    if ($completedJob.ChildJobs -and $completedJob.ChildJobs[0].JobStateInfo.Reason) {
+                        $reason = $completedJob.ChildJobs[0].JobStateInfo.Reason.Message
+                    }
+                    if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Unknown worker failure." }
+                    Write-Log "Worker job '$($completedJob.Name)' failed. $reason" "ERROR"
+                }
+
+                Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
+                for ($i = $pendingJobs.Count - 1; $i -ge 0; $i--) {
+                    if ($pendingJobs[$i].Id -eq $completedJob.Id) {
+                        $pendingJobs.RemoveAt($i)
+                        break
+                    }
+                }
+            }
+
+            $jobName = "BLG_{0}_{1}" -f (ConvertTo-SafeFileToken (Get-RelativeSourcePath $file.FullName)), ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+            $job = Start-Job -Name $jobName -ScriptBlock {
+                param($workerScriptPath, $workerFilePath, $workerResolvedRelogExe, $workerMaxProcessingCpus)
+                & $workerScriptPath -WorkerMode -WorkerFilePath $workerFilePath -WorkerResolvedRelogExe $workerResolvedRelogExe -MaxProcessingCpus $workerMaxProcessingCpus
+            } -ArgumentList @($scriptPath, $file.FullName, $script:ResolvedRelogExe, $workerCount)
+            $pendingJobs.Add($job)
+        }
+
+        while ($pendingJobs.Count -gt 0) {
+            $completedJob = Wait-Job -Job $pendingJobs.ToArray() -Any
+            if (-not $completedJob) { continue }
+
+            $jobOutput = @()
+            try {
+                $jobOutput = @(Receive-Job -Job $completedJob -ErrorAction Stop)
+            } catch {
+                Write-Log "Worker job '$($completedJob.Name)' failed while receiving results. $($_.Exception.Message)" "ERROR"
+            }
+
+            foreach ($entry in $jobOutput) {
+                if ($null -ne $entry -and $entry.PSObject.Properties["HostName"]) {
+                    $masterSummary.Add([PSCustomObject]$entry)
+                }
+            }
+
+            if ($completedJob.State -eq "Failed") {
+                $reason = $null
+                if ($completedJob.ChildJobs -and $completedJob.ChildJobs[0].JobStateInfo.Reason) {
+                    $reason = $completedJob.ChildJobs[0].JobStateInfo.Reason.Message
+                }
+                if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Unknown worker failure." }
+                Write-Log "Worker job '$($completedJob.Name)' failed. $reason" "ERROR"
+            }
+
+            Remove-Job -Job $completedJob -Force -ErrorAction SilentlyContinue
+            for ($i = $pendingJobs.Count - 1; $i -ge 0; $i--) {
+                if ($pendingJobs[$i].Id -eq $completedJob.Id) {
+                    $pendingJobs.RemoveAt($i)
+                    break
+                }
+            }
+        }
+
+        $masterSummary | Export-Csv $SummaryFile -NoTypeInformation
+        Write-Log "Analysis Complete. Reports located in: $ReportDir" "SUCCESS"
+        exit
+    }
+}
 
 foreach ($file in $blgFiles) {
-    $relativeSourcePath = $file.FullName
-    if ($relativeSourcePath.StartsWith($SourceDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $relativeSourcePath = ($relativeSourcePath.Substring($SourceDir.Length) -replace "^[\\/]+", "")
-    }
+    $relativeSourcePath = Get-RelativeSourcePath $file.FullName
     Write-Log "Found: $relativeSourcePath" "INFO"
 
     # 1. Zero-Byte Check
@@ -447,6 +569,11 @@ foreach ($file in $blgFiles) {
             Fidelity   = "$($avgInterval)s"
             Status     = if ($score -gt 0.7) { "Critical" } else { "Healthy" }
         })
+}
+
+if ($WorkerMode) {
+    $masterSummary
+    exit
 }
 
 $masterSummary | Export-Csv $SummaryFile -NoTypeInformation
