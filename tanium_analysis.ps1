@@ -76,7 +76,11 @@ function Get-ContentionScore ($listA, $listB) {
         $sumDenB += [Math]::Pow($diffB, 2)
     }
     $denominator = [Math]::Sqrt($sumDenA * $sumDenB)
-    return if ($denominator -eq 0) { 0 } else { [Math]::Round(($sumNum / $denominator), 3) }
+    if ($denominator -eq 0) {
+        return 0
+    } else {
+        return [Math]::Round(($sumNum / $denominator), 3)
+    }
 }
 
 function Get-TrendSlope ($yValues) {
@@ -91,7 +95,11 @@ function Get-TrendSlope ($yValues) {
         $sumX2 += ($x * $x)
     }
     $denominator = ($n * $sumX2) - ($sumX * $sumX)
-    return if ($denominator -eq 0) { 0 } else { (($n * $sumXY) - ($sumX * $sumY)) / $denominator }
+    if ($denominator -eq 0) {
+        return 0
+    } else {
+        return (($n * $sumXY) - ($sumX * $sumY)) / $denominator
+    }
 }
 
 function Resolve-RelogExePath ($PreferredPath) {
@@ -328,17 +336,17 @@ foreach ($file in $blgFiles) {
     }
 
     # --- STAGE 2: ANALYSIS ---
-    $processSummary = foreach ($pid in $procData.Keys) {
-        $avgUser = ($procData[$pid].User | Measure-Object -Average).Average
-        $avgPriv = ($procData[$pid].Priv | Measure-Object -Average).Average
+    $processSummary = foreach ($procName in $procData.Keys) {
+        $avgUser = ($procData[$procName].User | Measure-Object -Average).Average
+        $avgPriv = ($procData[$procName].Priv | Measure-Object -Average).Average
         [PSCustomObject]@{
-            PID       = $pid
-            AvgCPU    = [Math]::Round(($procData[$pid].CPU | Measure-Object -Average).Average, 2)
+            PID       = $procName
+            AvgCPU    = [Math]::Round(($procData[$procName].CPU | Measure-Object -Average).Average, 2)
             KURatio   = if ($avgUser -gt 0) { [Math]::Round(($avgPriv / $avgUser), 3) } else { 0 }
-            MemSlope  = [Math]::Round((Get-TrendSlope $procData[$pid].Mem) / 1MB, 4)
-            BasePrio  = [Math]::Round(($procData[$pid].Prio | Measure-Object -Average).Average, 0)
-            PeakMemMB = [Math]::Round(($procData[$pid].Mem | Measure-Object -Maximum).Maximum / 1MB, 2)
-            IsTan     = $pid -match "Tanium"
+            MemSlope  = [Math]::Round((Get-TrendSlope $procData[$procName].Mem) / 1MB, 4)
+            BasePrio  = [Math]::Round(($procData[$procName].Prio | Measure-Object -Average).Average, 0)
+            PeakMemMB = [Math]::Round(($procData[$procName].Mem | Measure-Object -Maximum).Maximum / 1MB, 2)
+            IsTan     = $procName -match "Tanium"
         }
     }
 
